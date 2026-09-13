@@ -29,6 +29,8 @@ export const errorCodeSchema = z.enum([
   'INVALID_ARGUMENT',
   'UNAUTHENTICATED',
   'TOKEN_EXPIRED',
+  'AUTH_INVALID_CREDENTIALS',
+  'INVITE_INVALID',
   'REFRESH_INVALID',
   'REFRESH_REUSED',
   'FORBIDDEN_NOT_MEMBER',
@@ -63,3 +65,23 @@ export const messageSendSchema = z.object({
   mentions: z.array(entityIdSchema).optional(),
 });
 export type MessageSend = z.infer<typeof messageSendSchema>;
+
+export const authRegisterSchema = z.object({
+  code: z.string().min(1),
+  username: z.string().min(2).max(32),
+  displayName: z.string().min(1).max(64),
+  password: z.string().min(10).regex(/[A-Za-z]/).regex(/[0-9]/),
+});
+export type AuthRegister = z.infer<typeof authRegisterSchema>;
+
+export const authLoginSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1),
+  clientKind: z.enum(['desktop', 'web']),
+});
+export type AuthLogin = z.infer<typeof authLoginSchema>;
+
+export const authRefreshSchema = z.object({
+  refreshToken: z.string().min(1).optional(),
+});
+export type AuthRefresh = z.infer<typeof authRefreshSchema>;

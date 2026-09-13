@@ -5,11 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/main.ts",
+    "pretest": "pnpm --filter @gongyouquan/contracts build",
     "test": "vitest run",
+    "pretypecheck": "pnpm --filter @gongyouquan/contracts build",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@gongyouquan/contracts": "workspace:*",
+    "argon2": "^0.31.2",
     "fastify": "^5.3.3",
     "jose": "^6.1.0",
     "pg": "^8.16.3",

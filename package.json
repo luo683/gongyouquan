@@ -8,8 +8,11 @@
     "node": ">=22 <23"
   },
   "scripts": {
+    "build": "pnpm --recursive --if-present run build",
     "check:workspace": "pnpm --recursive list --depth -1",
+    "pretest": "pnpm --filter @gongyouquan/contracts build",
     "test": "pnpm --recursive --if-present run test",
+    "pretypecheck": "pnpm --filter @gongyouquan/contracts build",
     "typecheck": "pnpm --recursive --if-present run typecheck",
     "lint": "pnpm --recursive --if-present run lint"
   }
