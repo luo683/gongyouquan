@@ -1,12 +1,10 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import { describe, expect, it } from 'vitest';
 import { registerAuthRoutes, type AuthRouteService } from '../src/auth/routes.js';
-import { createMessagesRepository, type MessageRepository } from '../src/messages/repository.js';
+import type { MessageRepository } from '../src/messages/repository.js';
 import { createMessagesService } from '../src/messages/service.js';
 import { createRateLimiter, LIMITS, type RateLimiter } from '../src/http/rate-limit.js';
 import { errorEnvelope } from '../src/http/errors.js';
-
-const secret = 'rate-limit-test-secret';
 
 function fakeAuth(): AuthRouteService & { calls: string[] } {
   const calls: string[] = [];

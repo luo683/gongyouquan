@@ -10,7 +10,8 @@
     "pretest": "pnpm --filter @gongyouquan/contracts build",
     "test": "vitest run",
     "pretypecheck": "pnpm --filter @gongyouquan/contracts build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@gongyouquan/contracts": "workspace:*",

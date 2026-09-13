@@ -1,8 +1,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { authLoginSchema, authRefreshSchema, authRegisterSchema } from '@gongyouquan/contracts';
-import { errorEnvelope, guarded, RateLimitedError, statusForErrorCode } from '../http/errors.js';
+import { errorEnvelope, guarded, RateLimitedError } from '../http/errors.js';
+import { type PublicUser } from './service.js';
 import { LIMITS, type RateLimiter } from '../http/rate-limit.js';
-import { AuthError, type PublicUser } from './service.js';
 
 type AuthRegisterResult = {
   user: PublicUser;
@@ -43,28 +43,10 @@ function cookies(request: FastifyRequest): Record<string, string> {
   }));
 }
 
-function statusFor(code: string): number {
-  return statusForErrorCode(code);
-}
-
 function errorResponse(request: FastifyRequest, code: string, details?: unknown) {
   return errorEnvelope(request, code, details);
 }
 
-/**
- * Thin alias over the shared guarded() rather than a second implementation.
- * The local version used to map only AuthError, so a RateLimitedError left
- * this handler as a 500 - and it could not emit Retry-After at all, because
- * that lives in errors.ts. Two error mappers in one app is how a 429 becomes
- * an internal error.
- */
-async function run<T>(
-  request: FastifyRequest,
-  fn: () => Promise<T>,
-  reply: FastifyReply,
-): Promise<T | undefined> {
-  return guarded(request, reply, fn);
-}
 
 export type AuthRouteOptions = {
   /**
@@ -96,11 +78,11 @@ export async function registerAuthRoutes(
   app.post('/api/v1/auth/register', async (request, reply) => {
     const parsed = authRegisterSchema.safeParse(request.body);
     if (!parsed.success) return reply.status(400).send(errorResponse(request, 'INVALID_ARGUMENT', parsed.error.flatten()));
-    const created = await run<AuthRegisterResult>(request, async () => {
+    const created = await guarded<AuthRegisterResult>(request, reply, async () => {
       // Invite codes look guessable, so registration is brute-forceable too.
       gate('auth/register:ip', request.ip, LIMITS.registerPerIp.limit, LIMITS.registerPerIp.windowMs);
       return auth.register(parsed.data);
-    }, reply);
+    });
     // 201, matching POST /groups. The spec fixes neither status code, but two
     // endpoints that both create a resource answering differently is the sort of
     // thing a client silently gets wrong. Registered in docs/decisions/0003.
@@ -111,7 +93,7 @@ export async function registerAuthRoutes(
   app.post('/api/v1/auth/login', async (request, reply) => {
     const parsed = authLoginSchema.safeParse(request.body);
     if (!parsed.success) return reply.status(400).send(errorResponse(request, 'INVALID_ARGUMENT', parsed.error.flatten()));
-    const result = await run<AuthResult>(request, async () => {
+    const result = await guarded<AuthResult>(request, reply, async () => {
       // Both dimensions, always: IP-only is bypassed by rotating addresses against
       // one account; username-only by rotating accounts from one box.
       gate('auth/login:ip', request.ip, LIMITS.loginPerIp.limit, LIMITS.loginPerIp.windowMs);
@@ -122,7 +104,7 @@ export async function registerAuthRoutes(
         LIMITS.loginPerUser.windowMs,
       );
       return auth.login(parsed.data);
-    }, reply);
+    });
     if (!result) return;
     if (parsed.data.clientKind === 'web') {
       reply.header('set-cookie', `refresh_token=${encodeURIComponent(result.refreshToken)}; HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth`);
@@ -138,7 +120,7 @@ export async function registerAuthRoutes(
     const token = parsed.data.refreshToken ?? cookies(request).refresh_token;
     if (!token) return reply.status(401).send(errorResponse(request, 'REFRESH_INVALID'));
     const clientKind = parsed.data.refreshToken ? 'desktop' : 'web';
-    const result = await run<AuthResult>(request, () => auth.refresh(token, clientKind), reply);
+    const result = await guarded<AuthResult>(request, reply, () => auth.refresh(token, clientKind));
     if (!result) return;
     if (clientKind === 'web') {
       reply.header('set-cookie', `refresh_token=${encodeURIComponent(result.refreshToken)}; HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth`);

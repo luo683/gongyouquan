@@ -45,7 +45,12 @@ describe('message contracts', () => {
 
   it('keeps BIGINT ids as strings so the browser never truncates them', () => {
     expect(messageDtoSchema.parse(messageFixture).id).toBe('9007199254740993');
-    expect(() => messageDtoSchema.parse({ ...messageFixture, id: 9007199254740993 })).toThrow();
+    // Number('...') rather than a bare literal: writing 9007199254740993 directly
+    // in source is already rounded by the parser before the schema ever sees it,
+    // which is the exact hazard this rule exists to point at. Asserted, not assumed.
+    const lossy = Number('9007199254740993');
+    expect(Number.isSafeInteger(lossy)).toBe(false);
+    expect(() => messageDtoSchema.parse({ ...messageFixture, id: lossy })).toThrow();
     expect(messageDtoSchema.parse(messageFixture).seq).toBe(106);
   });
 

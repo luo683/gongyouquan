@@ -11,7 +11,7 @@ function service(): AuthRouteService & { calls: string[] } {
       user: { id: '1', username: 'worker', displayName: '工友' },
       groups: [{ id: 'group-1', role: 'member' as const }],
     }),
-    login: async ({ clientKind }) => ({
+    login: async ({ clientKind: _clientKind }) => ({
       accessToken: 'access-token',
       refreshToken: 'refresh-token',
       expiresIn: 900,

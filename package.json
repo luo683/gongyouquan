@@ -2,6 +2,7 @@
   "name": "gongyouquan",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "工友圈：群聊与群内任务协作系统",
   "packageManager": "pnpm@9.15.9",
   "engines": {
@@ -14,6 +15,12 @@
     "test": "pnpm --recursive --if-present run test",
     "pretypecheck": "pnpm --filter @gongyouquan/contracts build",
     "typecheck": "pnpm --recursive --if-present run typecheck",
-    "lint": "pnpm --recursive --if-present run lint"
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9",
+    "typescript-eslint": "^8.70.0"
   }
 }

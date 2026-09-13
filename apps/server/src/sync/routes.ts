@@ -27,6 +27,8 @@ export async function registerSyncRoutes(
       return reply.status(400).send(errorEnvelope(request, 'INVALID_ARGUMENT', parsed.error.flatten()));
     }
     // groupId comes from the path, never from the query, so the membership check
+    // and the page can never be about different groups.
+    return guarded(request, reply, () => sync.pull(actor(request), { ...parsed.data, groupId: gid }));
   });
 
   app.get('/api/v1/groups/:gid/sync-state', { preHandler: requireAuth }, async (request, reply) => {

@@ -152,7 +152,14 @@ export function createAuthService(options: AuthServiceOptions) {
       return issueSession(user, input.clientKind);
     },
 
-    async refresh(refreshToken: string, clientKind: 'desktop' | 'web' = 'desktop') {
+    /**
+     * clientKind is accepted for symmetry with login and is deliberately unused:
+     * the only transport difference is where the refresh token travels (desktop
+     * body vs web HttpOnly cookie), which is the route's business, not the
+     * rotation's. Underscore-prefixed so the linter objects if anyone later gives
+     * it an effect that the callers do not know about.
+     */
+    async refresh(refreshToken: string, _clientKind: 'desktop' | 'web' = 'desktop') {
       const current = await options.repo.findSessionByRefreshHash(hashRefreshToken(refreshToken));
       const timestamp = now();
       if (!current) throw new AuthError('REFRESH_INVALID');
