@@ -1,0 +1,23 @@
+# The host's node_modules are built for Windows. Without this, `COPY packages/contracts`
+# layers them over the Linux install that the image just did, and the first
+# `tsc` invocation dies with "Cannot find module .../typescript/bin/tsc" - which
+# reads like a missing dependency and is actually a shadowed one.
+**/node_modules
+**/dist
+**/.vite
+
+.git
+.github
+**/*.tsbuildinfo
+.env
+.env.*
+!.env.example
+
+# Test and development material that must not change what ships.
+**/tests
+infra/db/docker-compose.yml
+
+# Editor / OS noise.
+.editorconfig
+.DS_Store
+Thumbs.db

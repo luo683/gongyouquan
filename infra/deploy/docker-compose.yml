@@ -1,0 +1,96 @@
+# 工友圈 - one command, whole stack.
+#
+#   docker compose -f infra/deploy/docker-compose.yml up -d --build
+#   open http://localhost:8080
+#   docker compose -f infra/deploy/docker-compose.yml down       # keeps the volume
+#   docker compose -f infra/deploy/docker-compose.yml down -v    # throws the data away
+#
+# Secrets here are development values, and the file is committed on purpose: this
+# stack is the demo target, not a production deployment. Production must inject
+# DATABASE_URL / JWT_SECRET / ALERT_HMAC_SECRET from outside and must not reuse
+# any string below.
+#
+# All values are quoted. `*` and `&` are YAML indicators, and an unquoted
+# `***` here is parsed as an undefined anchor - the file fails before Docker ever
+# sees it.
+name: gongyouquan
+
+services:
+  db:
+    # Mirror-pinned because registry-1.docker.io is unreachable from at least one
+    # development machine in this project (docs/decisions/0002).
+    image: docker.m.daocloud.io/library/postgres:17-alpine
+    environment:
+      POSTGRES_USER: 'gongyouquan'
+      POSTGRES_PASSWORD: 'dev-db-pass…-only'
+      POSTGRES_DB: 'gongyouquan'
+      # Verified rather than assumed: a wrong password from another container is
+      # refused with 28P01, so non-localhost connections do require the secret.
+      # The image's own localhost `trust` lines stay in place regardless of this
+      # variable, which is why the init script below is what actually pins the
+      # credential.
+      POSTGRES_HOST_AUTH_METHOD: 'scram-sha-256'
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      # Applied once, on an empty data directory. See the file's own comment.
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U gongyouquan -d gongyouquan']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  server:
+    build:
+      context: ../..
+      dockerfile: infra/deploy/Dockerfile.server
+    environment:
+      NODE_ENV: 'production'
+      PORT: '3000'
+      # The service name, not localhost: containers reach each other by network.
+      DATABASE_URL: 'postgres://gongyouquan:dev-db-password-only@db:5432/gongyouquan'
+      JWT_SECRET: 'dev-on…only'
+      UPLOAD_DIR: '/var/lib/gongyouquan/uploads'
+      PUBLIC_ORIGIN: 'http://localhost:8080'
+      # Meilisearch is intentionally absent from the stack: the spec's degraded
+      # path is PG pg_trgm, and that is what the real database already verified.
+      MEILI_URL: 'http://127.0.0.1:7700'
+      MEILI_MASTER_KEY: 'dev-meili-key'
+      ALERT_HMAC_SECRET: 'dev-alert-hmac-secret'
+      LOG_LEVEL: 'info'
+      # Injected rather than computed at build time; sync:hello carries it so an
+      # old client can warn instead of drifting silently.
+      CONTRACT_VERSION: 'compose-local'
+    volumes:
+      - uploads:/var/lib/gongyouquan/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # node:22-slim has no wget and no curl, so the probe cannot be a shell
+      # one-liner against a tool that is not in the image. Node 22 has global
+      # fetch, and it is the only HTTP client guaranteed to be present.
+      test: [
+        'CMD',
+        'node',
+        '-e',
+        "fetch('http://127.0.0.1:3000/readyz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+      ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infra/deploy/Dockerfile.web
+    ports:
+      - '8080:8080'
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  dbdata:
+  uploads:

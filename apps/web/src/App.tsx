@@ -27,6 +27,13 @@ export function App() {
   const [groupList, setGroupList] = groups;
   const [selected, setSelected] = useState<string | null>(null);
   const [streams, setStreams] = useState<Record<string, GroupState>>({});
+  /**
+   * userId -> displayName, per group, from GET /groups/:gid/members. MessageDto
+   * deliberately has no sender name, so this is the only honest way to label a
+   * bubble; without it the UI falls back to printing the id, which is what it
+   * did before and looked like a made-up name.
+   */
+  const [roster, setRoster] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState('');
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<Socket | null>(null);
@@ -125,6 +132,14 @@ export function App() {
     const socket = socketRef.current;
     if (!socket) return;
     const local = statesRef.current[groupId] ?? emptyGroup(0);
+    // Names come from the roster, not from the message: MessageDto has senderId
+    // only. Fetched before the history so the first paint is already labelled.
+    try {
+      const people = await api.members(groupId);
+      setRoster(Object.fromEntries(people.map((person) => [person.userId, person.displayName])));
+    } catch (error) {
+      if (error instanceof ApiError) setNotice(error.message);
+    }
     // 4.3.2: history first for context, then the replay for anything missed.
     try {
       const page = await api.history(groupId);
@@ -261,7 +276,13 @@ export function App() {
             <ol className="stream">
               {current.messages.map((message) => (
                 <li key={message.id} className={message.deletedAt ? 'msg gone' : 'msg'}>
-                  <span className="who">{message.senderId === tokens?.user.id ? '我' : `工友 ${message.senderId}`}</span>
+                  <span className="who">
+                    {message.senderId === tokens?.user.id
+                      ? '我'
+                      : message.senderId === null
+                        ? '系统'
+                        : (roster[message.senderId] ?? `工友 ${message.senderId}`)}
+                  </span>
                   <span className="body">
                     {message.deletedAt ? '该消息已撤回' : message.body}
                     {message.editedAt && !message.deletedAt ? <em className="tag">已编辑</em> : null}

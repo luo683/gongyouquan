@@ -1,0 +1,32 @@
+# Browser client: built to static files, then served by Caddy, which also
+# reverse-proxies /api and /socket.io to the backend so the whole app is
+# same-origin and needs no CORS negotiation.
+FROM node:22-alpine AS build
+
+RUN corepack enable
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/contracts/package.json packages/contracts/
+COPY apps/server/package.json apps/server/
+COPY apps/web/package.json apps/web/
+
+# Filtered install, and it matters more than saving time. A whole-workspace
+# install also pulls apps/server's dependencies, and argon2 is a native module
+# whose prebuilds want python3 + a C toolchain - neither exists in alpine's
+# default image, so the frontend build died compiling something it never uses.
+# All three manifests are still copied because --frozen-lockfile validates the
+# lockfile against every importer it can see; only two get installed.
+RUN pnpm install --frozen-lockfile --filter @gongyouquan/contracts --filter @gongyouquan/web
+
+COPY packages/contracts packages/contracts
+COPY apps/web apps/web
+
+RUN pnpm --filter @gongyouquan/contracts build \
+  && pnpm --filter @gongyouquan/web build
+
+FROM caddy:2-alpine
+COPY --from=build /app/apps/web/dist /srv
+COPY infra/deploy/Caddyfile /etc/caddy/Caddyfile
+
+EXPOSE 8080

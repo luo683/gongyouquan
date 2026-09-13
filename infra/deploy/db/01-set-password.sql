@@ -1,0 +1,14 @@
+-- Runs as the superuser over the local trust socket during first-time
+-- initialisation, then is never run again (the image only executes
+-- /docker-entrypoint-initdb.d on an empty data directory).
+--
+-- Why this exists at all: relying on POSTGRES_PASSWORD alone produced a role
+-- whose SCRAM verifier did not match the value the backend was configured
+-- with, so every cross-container connection was rejected with 28P01 while
+-- `psql` inside the container happily succeeded over its trust-only localhost
+-- line. Stating the credential here makes the stack deterministic instead of
+-- dependent on entrypoint ordering.
+--
+-- Development value only; production injects its own secret and must not use
+-- this file.
+ALTER USER gongyouquan WITH PASSWORD 'dev-db-password-only';

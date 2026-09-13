@@ -115,8 +115,24 @@ export const api = {
   createGroup: (input: { name: string; description?: string }) =>
     call<GroupDto>('/groups', { method: 'POST', body: input, schema: groupDtoSchema }),
 
-  history: async (groupId: string, beforeSeq?: string): Promise<{ items: MessageDto[]; nextCursor: string | null; hasMore: boolean }> => {
-    const query = new URLSearchParams({ limit: '50' });
+  /**
+   * MessageDto carries senderId, not a name - spec 5.4 never puts a display name
+   * on it (only lastMessagePreview has senderDisplayName). So the roster is the
+   * client's only source for "who said this", and it is fetched once per group
+   * rather than guessed at.
+   */
+  members: async (groupId: string): Promise<Array<{ userId: string; displayName: string; role: string }>> => {
+    const rows = await call<unknown>(`/groups/${groupId}/members`, {
+      method: 'GET',
+      schema: { parse: (value: unknown): unknown[] => value as unknown[] },
+    });
+    return (Array.isArray(rows) ? rows : []).map((row) => {
+      const member = row as { userId: string; displayName: string; role: string };
+      return { userId: member.userId, displayName: member.displayName, role: member.role };
+    });
+  },
+
+  history: async (groupId: string, beforeSeq?: string): Promise<{ items: MessageDto[]; nextCursor: string | null; hasMore: boolean }> => {    const query = new URLSearchParams({ limit: '50' });
     if (beforeSeq) query.set('beforeSeq', beforeSeq);
     const page = await call<{ items: unknown[]; nextCursor: string | null; hasMore: boolean }>(
       `/groups/${groupId}/messages?${query.toString()}`,

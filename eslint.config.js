@@ -53,6 +53,17 @@ export default tseslint.config(
   },
   {
     /**
+     * A CLI's whole purpose is stdout. no-console exists to keep request logs
+     * structured, and a command nobody runs interactively would be useless if it
+     * had to route its one output channel through a logger.
+     */
+    files: ['apps/server/src/cli/**/*.ts'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
+  {
+    /**
      * Tests deliberately assert against error shapes and reach into internals;
      * the assertions that still apply there are the ones about ids and console.
      */

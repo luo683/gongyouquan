@@ -1,0 +1,45 @@
+# Same-origin serving: the SPA plus a reverse proxy to the backend, so the
+# browser talks to /api and /socket.io on the port it was loaded from and no CORS
+# decision is ever made at runtime.
+#
+# `handle` blocks, not bare path matchers, and that is load-bearing. try_files is
+# a rewrite-phase directive and reverse_proxy is a service-phase one, so a
+# `reverse_proxy /api/*` sitting alongside try_files loses the race: the path is
+# already /index.html by the time the proxy matcher runs, and an API call gets a
+# 200 plus the SPA shell instead of the backend's JSON. Verified both ways:
+# before this, GET /api/v1/groups unauthenticated returned 200 text/html; the
+# backend itself answers 401 UNAUTHENTICATED.
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy server:3000
+	}
+
+	# WebSockets need the upgrade passthrough, and the idle timeout has to
+	# outlive Socket.IO's 25s ping interval or a backgrounded tab drops.
+	handle /socket.io/* {
+		reverse_proxy server:3000 {
+			flush_interval -1
+		}
+	}
+
+	handle /healthz {
+		reverse_proxy server:3000
+	}
+
+	handle /readyz {
+		reverse_proxy server:3000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
