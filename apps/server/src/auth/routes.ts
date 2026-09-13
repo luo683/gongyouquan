@@ -3,6 +3,11 @@ import { authLoginSchema, authRefreshSchema, authRegisterSchema } from '@gongyou
 import { errorEnvelope, statusForErrorCode } from '../http/errors.js';
 import { AuthError, type PublicUser } from './service.js';
 
+type AuthRegisterResult = {
+  user: PublicUser;
+  groups: Array<{ id: string; role: 'owner' | 'admin' | 'member' }>;
+};
+
 type AuthResult = {
   accessToken: string;
   refreshToken: string;
@@ -61,7 +66,12 @@ export async function registerAuthRoutes(app: FastifyInstance, auth: AuthRouteSe
   app.post('/api/v1/auth/register', async (request, reply) => {
     const parsed = authRegisterSchema.safeParse(request.body);
     if (!parsed.success) return reply.status(400).send(errorResponse(request, 'INVALID_ARGUMENT', parsed.error.flatten()));
-    return run(request, () => auth.register(parsed.data), reply);
+    const created = await run<AuthRegisterResult>(request, () => auth.register(parsed.data), reply);
+    // 201, matching POST /groups. The spec fixes neither status code, but two
+    // endpoints that both create a resource answering differently is the sort of
+    // thing a client silently gets wrong. Registered in docs/decisions/0003.
+    if (created) return reply.status(201).send(created);
+    return undefined;
   });
 
   app.post('/api/v1/auth/login', async (request, reply) => {
