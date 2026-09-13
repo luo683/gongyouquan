@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import { createDatabase, checkDatabase, getOutboxLag, migrateDatabase, type Database } from './db/pool.js';
 import { buildApp, type Runtime, type RuntimeOptions } from './runtime.js';
 import { parseEnv, type ServerEnv } from './config/env.js';
 
@@ -8,40 +9,70 @@ export type StartOptions = {
   runtime?: RuntimeOptions;
 };
 
-function defaultRuntimeOptions(env: ServerEnv): RuntimeOptions {
+function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptions {
   return {
     jwtSecret: new TextEncoder().encode(env.jwtSecret),
     contractVersion: env.contractVersion,
-    getReadiness: async () => ({
-      ok: false,
-      checks: { db: 'down', meili: 'down', outboxLag: null },
-    }),
+    getReadiness: async () => {
+      const db = await checkDatabase(database);
+      return {
+        ok: db === 'up',
+        checks: {
+          db,
+          meili: 'down',
+          outboxLag: db === 'up' ? await getOutboxLag(database) : null,
+        },
+      };
+    },
     getGroupSyncState: async () => null,
   };
 }
 
 export async function startServer(options: StartOptions = {}): Promise<Runtime> {
   const env = parseEnv(options.env ?? process.env);
-  const runtime = await buildApp(options.runtime ?? defaultRuntimeOptions(env));
-  const host = options.host ?? '0.0.0.0';
-  let stopping = false;
+  const database = createDatabase(env.databaseUrl);
+  let runtime: Runtime | undefined;
 
-  const stop = async () => {
-    if (stopping) return;
-    stopping = true;
-    await runtime.close();
-  };
-  const onSignal = () => {
-    void stop().catch((error: unknown) => {
-      console.error('graceful shutdown failed', error);
-      process.exitCode = 1;
-    });
-  };
+  try {
+    await migrateDatabase(database);
+    runtime = await buildApp(options.runtime ?? defaultRuntimeOptions(env, database));
+    const runtimeClose = runtime.close;
+    let closePromise: Promise<void> | undefined;
+    const close = (): Promise<void> => {
+      closePromise ??= (async () => {
+        try {
+          await runtimeClose();
+        } finally {
+          await database.end();
+        }
+      })();
+      return closePromise;
+    };
+    const managedRuntime: Runtime = { ...runtime, close };
+    const host = options.host ?? '0.0.0.0';
+    let stopping = false;
 
-  process.once('SIGTERM', onSignal);
-  process.once('SIGINT', onSignal);
-  await runtime.app.listen({ host, port: env.port });
-  return runtime;
+    const stop = async () => {
+      if (stopping) return;
+      stopping = true;
+      await managedRuntime.close();
+    };
+    const onSignal = () => {
+      void stop().catch((error: unknown) => {
+        console.error('graceful shutdown failed', error);
+        process.exitCode = 1;
+      });
+    };
+
+    process.once('SIGTERM', onSignal);
+    process.once('SIGINT', onSignal);
+    await managedRuntime.app.listen({ host, port: env.port });
+    return managedRuntime;
+  } catch (error) {
+    await runtime?.close().catch(() => undefined);
+    await database.end();
+    throw error;
+  }
 }
 
 const isMainModule = process.argv[1]
