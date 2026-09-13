@@ -92,6 +92,10 @@ c88068c fix(contracts): add error codes the server mapping can emit
 | **auth**：邀请码注册（同事务消耗次数）、Argon2id、登录、refresh 轮换、旧 token 重用→整族撤销、logout | `src/auth/` |
 | **groups**：建群（创建者 owner）、群列表、详情（含 `myMembership`）、成员列表、改群信息 | `src/groups/` |
 | **messages** 写入路径：`alloc_group_seq` 同事务发号、`(sender_id, client_msg_id)` 幂等重发、历史分页、15 分钟编辑窗与 2 分钟撤回窗（按 3.4 两行分开）、撤回留痕与 `/raw` 分级、每次变更同事务写 outbox | `src/messages/` |
+| **sync**：`sync:hello` 水位（只报调用者真正在的群）、`sync:pull` 按当前状态补投（不重放事件）、`asOfSeq` 永不倒退、`read:update` 双向 `GREATEST` 位点 | `src/sync/` |
+| Socket.IO 线：`sync:hello` / `sync:pull` / `message:send` / `message:edit` / `message:delete` / `read:update`；ack 一律是契约载荷或 `{error:{code,message}}` | `src/runtime.ts` |
+| 提交后经 bus 广播 `message:new` / `message:updated` / `message:deleted`（完整 DTO，非 diff） | `src/messages/bus.ts` |
+| **限流**：令牌桶 + 可注入时钟；login 双维度 / register / refresh 会话族 / 发消息双维度 / 写接口兜底，429 带 `Retry-After`；`logout-all` 返回 `revokedCount` | `src/http/rate-limit.ts` |
 |
  
 *
@@ -508,14 +512,14 @@ s
 
 ```text
 packages/contracts   4 文件 / 29 用例
-apps/server         14 文件 / 82 用例（其中 45 个需要真实数据库）
-合计                18 文件 / 111 用例，全绿
+apps/server         16 文件 / 97 用例（其中 47 个需要真实数据库）
+合计                20 文件 / 126 用例，全绿
 ```
 
 ### 真实数据库闸门
 
 `apps/server/tests/integration/database.test.ts` 是仓库里唯一会连真库的测试。
-由 `INTEGRATION_DATABASE_URL` 控制：不设这个变量时那 45 个用例整体 skip，
+由 `INTEGRATION_DATABASE_URL` 控制：不设这个变量时那 47 个用例整体 skip，
 所以 `pnpm test` 在没有任何数据库的机器上依然全绿。跑它：
 
 ```bash
@@ -551,7 +555,7 @@ pnpm --filter @gongyouquan/server test        # 只跑服务端
 pnpm --filter @gongyouquan/contracts test     # 只跑契约
 ```
 
-真实数据库闸门（不设 `INTEGRATION_DATABASE_URL` 时那 45 个用例整体 skip）：
+真实数据库闸门（不设 `INTEGRATION_DATABASE_URL` 时那 47 个用例整体 skip）：
 
 ```bash
 docker compose -f infra/db/docker-compose.yml up -d      # postgres:17-alpine，宿主端口 55432
@@ -646,5 +650,5 @@ pnpm --filter @gongyouquan/server dev
 8. `outbox.aggregate_id` **没有也不可能有外键**（它是多态的）。消息被删掉后事件会留下来，而 `readyz` 的 lag 取的是「最老的未处理事件」——一条孤儿就能把 lag 永久钉住。worker 必须让每个事件都到终态，见 `docs/decisions/0006` 缺口六。
 9. 编辑要同时写 `edited_at`。只改 `body` 的话 `updated_at` 会被触发器推进，测试照样绿，但 `editedAt` 永远是 null，前端显示不出「已编辑」。
 
-10. **一条 SELECT 拼字符串时，别忘了它到底有没有 `WHERE`**。`sync` 的水位查询原本以 `LEFT JOIN ... ON` 结尾，调用方在后面接 `AND g.id = ANY(...)`，语法完全合法、语义却变成「过滤 join 而不是过滤群」：用户所属的**每一个**群都会返回，于是 A 群成员问 B 群也能通过成员校验、拿到 B 群的消息。这类洞静态检查和「看起来对」的单测都抓不到，必须有一个「我在 A 群、我问 B 群」的用例。见 `tests/integration/sync.test.ts` 与 `tests/e2e/group-chat.test.ts`。
-11. **改测试文件时留意 `afterAll` 有没有被一起替换掉**。端到端套件的清理曾被整段删掉而全套仍然全绿，只是每次跑完在库里留下四个用户和它们的事件。判断依据不是灯，是跑完后 `SELECT count(*) FROM users` 该是 0。
+10. **`revoked_reason` 是字符串字面量，不是列名。** 单会话登出的 SQL 原来写成 `revoked_reason = logout`（缺引号），单元测试全绿，因为它跑在内存假仓储上；真库套件此前也没有一条用例调用 `logout()`。补 `logout-all` 时才撞上。教训是：**「切片已在真库上跑过」不等于每条 SQL 都被跑过**。
+11. **一条 SELECT 拼字符串时，别忘了它到底有没有 `WHERE`**。
