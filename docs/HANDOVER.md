@@ -92,6 +92,8 @@ c88068c fix(contracts): add error codes the server mapping can emit
 | 错误可携带机器可读的 `details`（`HttpError(code, details)` → `errorEnvelope`） | `src/http/errors.ts` |
 | **auth**：邀请码注册（同事务消耗次数）、Argon2id、登录、refresh 轮换、旧 token 重用→整族撤销、logout | `src/auth/` |
 | **groups**：建群（创建者 owner）、群列表、详情（含 `myMembership`）、成员列表、改群信息 | `src/groups/` |
+| **首个账号引导**：`docker compose run --rm server node --import tsx src/cli/create-admin.ts` —— 一次性建 用户 + 系统群 + 邀请码并打印，登录自校验；重复运行会拒绝。不在启动时自动执行（理由见说明书 §11 与文件头注释） | `src/cli/create-admin.ts` |
+| **一键全栈**：`docker compose -f infra/deploy/docker-compose.yml up -d` —— Postgres + API + Caddy（静态托管与 `/api`、`/socket.io` 反代），三条健康检查串成启动顺序 | `infra/deploy/` |
 | **messages** 写入路径：`alloc_group_seq` 同事务发号、`(sender_id, client_msg_id)` 幂等重发、历史分页、15 分钟编辑窗与 2 分钟撤回窗（按 3.4 两行分开）、撤回留痕与 `/raw` 分级、每次变更同事务写 outbox | `src/messages/` |
 | **sync**：`sync:hello` 水位（只报调用者真正在的群）、`sync:pull` 按当前状态补投（不重放事件）、`asOfSeq` 永不倒退、`read:update` 双向 `GREATEST` 位点 | `src/sync/` |
 | Socket.IO 线：`sync:hello` / `sync:pull` / `message:send` / `message:edit` / `message:delete` / `read:update`；ack 一律是契约载荷或 `{error:{code,message}}` | `src/runtime.ts` |
@@ -540,10 +542,11 @@ PowerShell 用 `$env:INTEGRATION_DATABASE_URL="..."` 单独一行。用例跑完
 
 1. ~~真实 PostgreSQL 验证~~ **已完成**（2026-09-13）—— 建库、迁移幂等、checksum 防篡改、auth/groups 的 SQL 都已在 PG 17.11 上跑过，并固化成测试。数据库这边只剩说明书 1685 行要求的 `EXPLAIN (ANALYZE, BUFFERS)` + 几千行样例数据。
 2. **成员管理与邀请码接口** —— 踢人 / 加人（复活）/ 改角色 / 转让群主 / 邀请码增删查。
-3. **限流**（说明书 5.5 节：login 双维度、register 每 IP 3/小时、refresh 全缺）、`logout-all`。**注册后必须再登录一次才拿得到 token**（decision 0003 已补记）。
+3. ~~限流~~ **已落地**：login 双维度、register、refresh 会话族、发消息双维度、写接口兜底，429 带 `Retry-After`；`logout-all` 已实现。取舍见 `docs/decisions/0007`。仍缺：`/hooks/*` 的幂等与聚合（属于 `ops` 模块）、改密接口（`logout-all` 目前只能由前端显式调用）。
 4. **messages / sync 已打通（服务端 + 客户端）；仍缺**：已读回执 `GET /messages/:mid/receipts`（4.4.3 的 detail 分级）、`typing:*` 与 `presence:updated`、`mention:new`、编辑/撤回窗口过期的 socket 侧对 `read:updated` 的推送、`/messages/:mid/raw` 的 HTTP 路由（service 已有）。之后是 `tasks` / `files` / `search` / `ops`。
 5. **浏览器端已可用**（React + Vite，真库+真 socket 手工验证过一轮）。仍缺：Electron 外壳（`apps/desktop`）、改密与登出全部设备入口、已读回执展示、归档群入口、第二个群的加入入口——后者卡在服务端还没有邀请管理接口，客户端**故意不伪造**邀请码，见 `apps/web/src/api.ts` 顶部注释。
-6. **部署与运维** —— Docker Compose、Caddyfile、备份、systemd、opsctl 全部未开始。
+6. **部署：本地全栈已可一键起**（`infra/deploy/docker-compose.yml`：Postgres + API + Caddy 静态托管与反代，含三条健康检查与 `create-admin` 引导）。**仍缺**：备份与恢复演练（说明书 §9 要求）、systemd 单元、`opsctl`、`/internal/metrics`、告警接入、以及生产版的 secret 注入——compose 里的口令是开发值，不能带上公网。
+7. **`CONTRACT_VERSION` 目前是注入的常量**，不是说明书 §7 第 4 条要求的「contracts 包 hash 前 8 位」。构建期没有计算步骤，`create-admin` 与 compose 只是把环境变量透传下去。
 7. **`lint` 是空转** —— 根有 `lint` script，两个子包都没定义，`--if-present` 直接跳过。CI 里的 "lint" 步骤没有任何实际作用。
 
 ---
