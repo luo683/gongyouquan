@@ -10,13 +10,18 @@ describe('shared contract foundation', () => {
   it('keeps entity ids as strings while sequence values stay numbers', () => {
     const parsed = messageSendSchema.parse({
       groupId: '12',
-      clientMsgId: 'client-1',
+      clientMsgId: '3f7a2b1c-0d4e-5a6b-8c9d-0e1f2a3b4c5d',
       kind: 'text',
       body: 'hello',
     });
 
     expect(parsed.groupId).toBe('12');
     expect(() => messageSendSchema.parse({ ...parsed, groupId: 12 })).toThrow();
+  });
+
+  it('refuses a clientMsgId that is not a UUID - retries must be able to reuse it', () => {
+    expect(() => messageSendSchema.parse({ groupId: '12', clientMsgId: 'client-1', kind: 'text' })).toThrow();
+    expect(() => messageSendSchema.parse({ groupId: '12', clientMsgId: '', kind: 'text' })).toThrow();
   });
 
   it('distinguishes cursor pages from sync pages', () => {
