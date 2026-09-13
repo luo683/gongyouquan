@@ -1,0 +1,32 @@
+{
+  "name": "@gongyouquan/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.build.json && vite build",
+    "preview": "vite preview",
+    "pretest": "pnpm --filter @gongyouquan/contracts build",
+    "test": "vitest run",
+    "pretypecheck": "pnpm --filter @gongyouquan/contracts build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@gongyouquan/contracts": "workspace:*",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/react": "^16.3.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.4.1",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.4"
+  }
+}
