@@ -2,7 +2,15 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 
 /** Application-level error carrying a machine-readable code from the shared contract. */
 export class HttpError extends Error {
-  constructor(public readonly code: string) {
+  /**
+   * `details` is the machine-readable half of the error contract (spec 8.1 reserves
+   * envelope.details for it, and acceptance item 10 needs details.currentStatus).
+   * Chinese copy stays in the client, keyed off `code`.
+   */
+  constructor(
+    public readonly code: string,
+    public readonly details?: unknown,
+  ) {
     super(code);
     this.name = 'HttpError';
   }
@@ -54,7 +62,10 @@ export async function guarded<T>(
   } catch (error) {
     const code = error instanceof HttpError ? error.code : 'INTERNAL_ERROR';
     if (!(error instanceof HttpError)) console.error('unhandled request error', error);
-    await reply.status(statusForErrorCode(code)).send(errorEnvelope(request, code));
+    const details = error instanceof HttpError ? error.details : undefined;
+    await reply
+      .status(statusForErrorCode(code))
+      .send(errorEnvelope(request, code, details));
     return undefined;
   }
 }
