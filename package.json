@@ -9,8 +9,8 @@
   },
   "scripts": {
     "check:workspace": "pnpm --recursive list --depth -1",
-    "test": "pnpm --recursive run test --if-present",
-    "typecheck": "pnpm --recursive run typecheck --if-present",
-    "lint": "pnpm --recursive run lint --if-present"
+    "test": "pnpm --recursive --if-present run test",
+    "typecheck": "pnpm --recursive --if-present run typecheck",
+    "lint": "pnpm --recursive --if-present run lint"
   }
 }
