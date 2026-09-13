@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createAuthRepository } from '../../src/auth/repository.js';
 import { createAuthService } from '../../src/auth/service.js';
+import { createRateLimiter } from '../../src/http/rate-limit.js';
+import { HttpError } from '../../src/http/errors.js';
 import { createGroupsRepository } from '../../src/groups/repository.js';
 import { createGroupsService } from '../../src/groups/service.js';
 import type { Database } from '../../src/db/pool.js';
@@ -213,7 +215,98 @@ describe.runIf(databaseUrl() !== '')('database integration (real PostgreSQL)', (
       expect(num(row.reuse_marked)).toBeGreaterThanOrEqual(1);
     });
 
-    it('collapses username case so login cannot fork a second account', async () => {
+    it('revokes every live session for an identity exactly once (logout-all)', async () => {
+    const username = `multi-${runTag}`;
+    const auth = createAuthService({ repo: createAuthRepository(db), jwtSecret });
+    const groupId = await seedGroup();
+    await insertInvite(groupId, `INV-MA-${runTag}`, 2);
+    const password = 'HardPass2026';
+
+    await auth.register({ code: `INV-MA-${runTag}`, username, displayName: '多端', password });
+    const first = await auth.login({ username, password, clientKind: 'desktop' });
+    const second = await auth.login({ username, password, clientKind: 'web' });
+    expect(first.refreshToken).not.toBe(second.refreshToken);
+
+    const before = await db.query<Row>(
+      `SELECT count(*) AS c FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = $1)
+         AND revoked_at IS NULL`,
+      [username],
+    );
+    expect(num(row0(before.rows).c)).toBe(2);
+
+    const account = await db.query<Row>('SELECT id FROM users WHERE username = $1', [username]);
+    const userId = str(row0(account.rows).id);
+    const service = createAuthService({ repo: createAuthRepository(db), jwtSecret });
+    const revoked = await service.logoutAll(userId);
+    expect(revoked).toBe(2);
+
+    // A second call has nothing left to revoke, so revokedCount cannot be used to
+    // double-count the same sessions.
+    expect(await service.logoutAll(userId)).toBe(0);
+
+    // logout(refreshToken) is the single-session path, and it shares the
+    // revoked_reason literal space with logout-all. It had an unquoted
+    // `revoked_reason = logout` in its UPDATE - a bare column reference that
+    // PostgreSQL rejects at runtime, which no test had ever reached because
+    // the unit suites all used an in-memory repository.
+    await service.logout(first.refreshToken);
+    const singles = await db.query<Row>(
+      `SELECT revoked_reason FROM sessions WHERE user_id = $1 AND revoked_at IS NOT NULL`,
+      [userId],
+    );
+    expect(singles.rows.length).toBeGreaterThanOrEqual(1);
+    expect(singles.rows.every((r) => str(r.revoked_reason) === 'logout')).toBe(true);
+
+    // Both tokens are now dead.
+    await expectCode('REFRESH_INVALID', () => auth.refresh(first.refreshToken));
+    await expectCode('REFRESH_INVALID', () => auth.refresh(second.refreshToken));
+  });
+
+  it('throttles a refresh storm per session family, before any rotation is written', async () => {
+    // Spec 8.2 wants limits ahead of database work. The family is only knowable
+    // from the token, so this bucket is taken after one indexed SELECT and before
+    // the INSERT + two UPDATEs - see docs/decisions/0007.
+    const limiter = createRateLimiter();
+    const username = `storm-${runTag}`;
+    const password = 'HardPass2026';
+    const groupId = await seedGroup();
+    await insertInvite(groupId, `INV-ST-${runTag}`, 1);
+
+    const service = createAuthService({
+      repo: createAuthRepository(db),
+      jwtSecret,
+      limiter,
+    });
+    const registered = await service.register({
+      code: `INV-ST-${runTag}`,
+      username,
+      displayName: '风暴',
+      password,
+    });
+    const loggedIn = await service.login({ username, password, clientKind: 'desktop' });
+
+    let token = loggedIn.refreshToken;
+    let refused = 0;
+    let rotated = 0;
+    for (let i = 0; i < 40; i += 1) {
+      try {
+        const next = await service.refresh(token);
+        token = next.refreshToken;
+        rotated += 1;
+      } catch (error) {
+        if ((error as HttpError).code === 'RATE_LIMITED') refused += 1;
+        else throw error;
+      }
+    }
+    expect(rotated).toBe(30);
+    expect(refused).toBe(10);
+
+    // The refusal is per family, so a different device of the same user is untouched.
+    const other = await service.login({ username, password, clientKind: 'web' });
+    expect((await service.refresh(other.refreshToken)).user.id).toBe(registered.user.id);
+  });
+
+  it('collapses username case so login cannot fork a second account', async () => {
       await insertUser(`case-${runTag}`);
       await expectRejected(
         `INSERT INTO users (username, display_name, password_hash) VALUES ($1, 'X', 'hash')`,
