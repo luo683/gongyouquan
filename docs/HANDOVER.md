@@ -48,6 +48,7 @@ c88068c fix(contracts): add error codes the server mapping can emit
 ```text
 工友圈/
 ├── apps/server/            后端单进程服务（Fastify + Socket.IO）
+├── apps/web/               浏览器端（React + Vite + TS），复用 contracts 同一套 schema
 │   ├── src/config/env.ts   环境变量集中校验，缺失即启动失败
 │   ├── src/db/             连接池、迁移加载器、幂等迁移执行器
 │   ├── src/http/           统一错误封装、Bearer 鉴权
@@ -95,6 +96,8 @@ c88068c fix(contracts): add error codes the server mapping can emit
 | **sync**：`sync:hello` 水位（只报调用者真正在的群）、`sync:pull` 按当前状态补投（不重放事件）、`asOfSeq` 永不倒退、`read:update` 双向 `GREATEST` 位点 | `src/sync/` |
 | Socket.IO 线：`sync:hello` / `sync:pull` / `message:send` / `message:edit` / `message:delete` / `read:update`；ack 一律是契约载荷或 `{error:{code,message}}` | `src/runtime.ts` |
 | 提交后经 bus 广播 `message:new` / `message:updated` / `message:deleted`（完整 DTO，非 diff） | `src/messages/bus.ts` |
+| **浏览器端**：邀请码注册/登录、群列表带服务端未读数、按 `sync:hello`→`sync:pull` 冷启动、发送与撤回走 socket ack、4.3.4 客户端状态机（`syncedSeq` / `pendingNew` / `eventBuffer`） | `apps/web/src/` |
+| 中文文案全部由 `code` 在前端映射（`errorEnvelope.message` 只进日志）；`RATE_LIMITED` 会把等待秒数拼进提示 | `apps/web/src/copy.ts` |
 | **限流**：令牌桶 + 可注入时钟；login 双维度 / register / refresh 会话族 / 发消息双维度 / 写接口兜底，429 带 `Retry-After`；`logout-all` 返回 `revokedCount` | `src/http/rate-limit.ts` |
 |
  
@@ -513,13 +516,14 @@ s
 ```text
 packages/contracts   4 文件 / 29 用例
 apps/server         16 文件 / 97 用例（其中 47 个需要真实数据库）
-合计                20 文件 / 126 用例，全绿
+apps/web             1 文件 /  9 用例（4.3.4 客户端状态机，纯逻辑无需浏览器）
+合计                21 文件 / 135 用例，全绿
 ```
 
 ### 真实数据库闸门
 
 `apps/server/tests/integration/database.test.ts` 是仓库里唯一会连真库的测试。
-由 `INTEGRATION_DATABASE_URL` 控制：不设这个变量时那 47 个用例整体 skip，
+由 `INTEGRATION_DATABASE_URL` 控制：不设这个变量时那 47 个用例整体 skip（server 包内），
 所以 `pnpm test` 在没有任何数据库的机器上依然全绿。跑它：
 
 ```bash
@@ -537,8 +541,8 @@ PowerShell 用 `$env:INTEGRATION_DATABASE_URL="..."` 单独一行。用例跑完
 1. ~~真实 PostgreSQL 验证~~ **已完成**（2026-09-13）—— 建库、迁移幂等、checksum 防篡改、auth/groups 的 SQL 都已在 PG 17.11 上跑过，并固化成测试。数据库这边只剩说明书 1685 行要求的 `EXPLAIN (ANALYZE, BUFFERS)` + 几千行样例数据。
 2. **成员管理与邀请码接口** —— 踢人 / 加人（复活）/ 改角色 / 转让群主 / 邀请码增删查。
 3. **限流**（说明书 5.5 节：login 双维度、register 每 IP 3/小时、refresh 全缺）、`logout-all`。**注册后必须再登录一次才拿得到 token**（decision 0003 已补记）。
-4. **messages / sync 已打通写入与补投；仍缺**：已读回执 `GET /messages/:mid/receipts`（4.4.3 的 detail 分级）、`typing:*` 与 `presence:updated`、`mention:new`、编辑/撤回窗口过期的 socket 侧对 `read:updated` 的推送、`/messages/:mid/raw` 的 HTTP 路由（service 已有）。之后是 `tasks` / `files` / `search` / `ops`。
-5. **浏览器端（React）、Electron 外壳**。
+4. **messages / sync 已打通（服务端 + 客户端）；仍缺**：已读回执 `GET /messages/:mid/receipts`（4.4.3 的 detail 分级）、`typing:*` 与 `presence:updated`、`mention:new`、编辑/撤回窗口过期的 socket 侧对 `read:updated` 的推送、`/messages/:mid/raw` 的 HTTP 路由（service 已有）。之后是 `tasks` / `files` / `search` / `ops`。
+5. **浏览器端已可用**（React + Vite，真库+真 socket 手工验证过一轮）。仍缺：Electron 外壳（`apps/desktop`）、改密与登出全部设备入口、已读回执展示、归档群入口、第二个群的加入入口——后者卡在服务端还没有邀请管理接口，客户端**故意不伪造**邀请码，见 `apps/web/src/api.ts` 顶部注释。
 6. **部署与运维** —— Docker Compose、Caddyfile、备份、systemd、opsctl 全部未开始。
 7. **`lint` 是空转** —— 根有 `lint` script，两个子包都没定义，`--if-present` 直接跳过。CI 里的 "lint" 步骤没有任何实际作用。
 
