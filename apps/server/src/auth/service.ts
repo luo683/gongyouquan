@@ -1,7 +1,8 @@
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import argon2 from 'argon2';
 import { SignJWT } from 'jose';
-import { HttpError } from '../http/errors.js';
+import { HttpError, RateLimitedError } from '../http/errors.js';
+import { LIMITS } from '../http/rate-limit.js';
 
 export type AuthUser = {
   id: string;
@@ -55,6 +56,7 @@ export type AuthRepository = {
     now: Date;
   }): Promise<{ kind: 'invalid' | 'reused' | 'rotated'; session?: AuthSession }>;
   revokeSession(session: AuthSession, now: Date): Promise<void>;
+  revokeAllForUser(userId: string, now: Date): Promise<number>;
 };
 
 export class AuthError extends HttpError {}
@@ -63,6 +65,15 @@ type AuthServiceOptions = {
   repo: AuthRepository;
   jwtSecret: string;
   now?: () => Date;
+  /**
+   * The 30/分钟 refresh bucket is keyed on the session family, and the family is
+   * only knowable from the token - which means this one limit cannot sit in front
+   * of a database read the way 8.2 asks. It is taken after the lookup and before
+   * the rotation write, so a refresh storm still costs one indexed SELECT rather
+   * than an INSERT plus two UPDATEs per attempt. docs/decisions/0007 records the
+   * deviation instead of pretending the rule was met verbatim.
+   */
+  limiter?: import('../http/rate-limit.js').RateLimiter;
 };
 
 const ACCESS_TOKEN_SECONDS = 15 * 60;
@@ -82,6 +93,7 @@ function newRefreshToken(): string {
 
 export function createAuthService(options: AuthServiceOptions) {
   const now = options.now ?? (() => new Date());
+  const limiter = options.limiter;
   const secret = new TextEncoder().encode(options.jwtSecret);
 
   async function accessToken(userId: string, sessionId: string): Promise<string> {
@@ -144,6 +156,14 @@ export function createAuthService(options: AuthServiceOptions) {
       const current = await options.repo.findSessionByRefreshHash(hashRefreshToken(refreshToken));
       const timestamp = now();
       if (!current) throw new AuthError('REFRESH_INVALID');
+      if (limiter) {
+        const decision = limiter.take(
+          `auth/refresh:family:${current.familyId}`,
+          LIMITS.refreshPerFamily.limit,
+          LIMITS.refreshPerFamily.windowMs,
+        );
+        if (!decision.allowed) throw new RateLimitedError(decision.retryAfterSeconds, 'auth/refresh');
+      }
       if (current.replacedBy) {
         const result = await options.repo.rotateSession({
           current,
@@ -193,6 +213,10 @@ export function createAuthService(options: AuthServiceOptions) {
     async logout(refreshToken: string) {
       const session = await options.repo.findSessionByRefreshHash(hashRefreshToken(refreshToken));
       if (session) await options.repo.revokeSession(session, now());
+    },
+
+    async logoutAll(userId: string): Promise<number> {
+      return options.repo.revokeAllForUser(userId, now());
     },
   };
 }

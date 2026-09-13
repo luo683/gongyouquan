@@ -9,6 +9,7 @@ import { createMessagesService } from './messages/service.js';
 import { createMessageBus } from './messages/bus.js';
 import { createSyncRepository } from './sync/repository.js';
 import { createSyncService } from './sync/service.js';
+import { createRateLimiter } from './http/rate-limit.js';
 import { buildApp, type Runtime, type RuntimeOptions } from './runtime.js';
 import { parseEnv, type ServerEnv } from './config/env.js';
 
@@ -29,6 +30,10 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
   const groupsRepo = createGroupsRepository(database);
   const messagesRepo = createMessagesRepository(database);
   const bus = createMessageBus();
+  // One bucket store for the whole process, shared by the HTTP routes, the socket
+  // handlers and the services. Spec 8.2 is a single-process design; several
+  // replicas would each get their own copy of every limit.
+  const limiter = createRateLimiter();
   return {
     jwtSecret: new TextEncoder().encode(env.jwtSecret),
     contractVersion: env.contractVersion,
@@ -46,13 +51,16 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
     auth: createAuthService({
       repo: createAuthRepository(database),
       jwtSecret: env.jwtSecret,
+      // The refresh-family bucket cannot be checked before the session lookup,
+      // so the service owns it; see createAuthService.
+      limiter,
     }),
-    groups: createGroupsService(groupsRepo),
+    groups: createGroupsService(groupsRepo, { limiter }),
     // One shared bus: the write path publishes here after COMMIT and buildApp
     // attaches the Socket.IO emitter to it, so nothing in src/messages needs to
     // know what a room is.
     bus,
-    messages: createMessagesService(messagesRepo, groupsRepo, { publish: bus.publish }),
+    messages: createMessagesService(messagesRepo, groupsRepo, { publish: bus.publish, limiter }),
     // Membership is read through the groups repository on purpose: one guard
     // implementation, not a second copy that can drift.
     sync: createSyncService({

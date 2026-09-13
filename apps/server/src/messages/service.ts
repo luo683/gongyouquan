@@ -1,5 +1,6 @@
 import type { GroupRole, MessageDto, MessageHistoryQuery, MessageSend } from '@gongyouquan/contracts';
-import { HttpError } from '../http/errors.js';
+import { HttpError, RateLimitedError } from '../http/errors.js';
+import { LIMITS, type RateLimiter } from '../http/rate-limit.js';
 import { requireMembership, requireRole, requireWritable, type GroupMembership } from '../groups/guards.js';
 import type { MessageRepository } from './repository.js';
 
@@ -36,6 +37,13 @@ export type MessageEvent = 'message:new' | 'message:updated' | 'message:deleted'
 
 export type MessagesServiceOptions = {
   publish?: MessagePublisher;
+  /**
+   * Rate policy. It lives on the service rather than on either transport because
+   * spec 8.2 says 发消息（WS 与 HTTP 共用计数） - one bucket per user and group.
+   * Mounted on the routes it would become two counters that a client can double
+   * simply by choosing which transport to talk on.
+   */
+  limiter?: RateLimiter;
 };
 
 export function createMessagesService(
@@ -46,6 +54,17 @@ export function createMessagesService(
   const publish = async (event: MessageEvent, message: MessageDto): Promise<void> => {
     if (options.publish) await options.publish(event, message);
   };
+
+  const { limiter } = options;
+  function gate(scope: string, key: string, limit: number, windowMs: number): void {
+    if (!limiter) return;
+    const decision = limiter.take(`${scope}:${key}`, limit, windowMs);
+    if (!decision.allowed) throw new RateLimitedError(decision.retryAfterSeconds, scope);
+  }
+  /** The catch-all for writes that are not spam-shaped: 其他写接口 600/分钟. */
+  function gateWrite(actor: string, what: string): void {
+    gate('write:' + what, actor, LIMITS.otherWritesPerUser.limit, LIMITS.otherWritesPerUser.windowMs);
+  }
   /** Membership first, then the archived write gate. Reads never pass through here. */
   async function writableMembership(groupId: string, actor: string): Promise<GroupMembership> {
     if (!(await groups.getGroup(groupId))) throw new HttpError('NOT_FOUND');
@@ -74,6 +93,15 @@ export function createMessagesService(
         throw new HttpError('INVALID_ARGUMENT', { field: 'clientMsgId' });
       }
 
+      // Both send buckets are taken before the membership queries, so a flood from
+      // one user costs no database work at all (spec 8.2).
+      gate('message:send:user', actor, LIMITS.sendPerUser.limit, LIMITS.sendPerUser.windowMs);
+      gate(
+        'message:send:group',
+        `${actor}:${input.groupId}`,
+        LIMITS.sendPerUserGroup.limit,
+        LIMITS.sendPerUserGroup.windowMs,
+      );
       await writableMembership(input.groupId, actor);
       const outcome = await repo.send({
         groupId: input.groupId,
@@ -88,6 +116,7 @@ export function createMessagesService(
     },
 
     async edit(actor: string, messageId: string, body: string): Promise<MessageDto> {
+      gateWrite(actor, 'message:edit');
       const { membership } = await messageInGroup(messageId, actor);
       requireWritable(membership);
       // Authorship is enforced by the UPDATE itself so the clock and the
@@ -116,6 +145,7 @@ export function createMessagesService(
      * weak-network client that retries must not see a failure for work already done.
      */
     async revoke(actor: string, messageId: string): Promise<void> {
+      gateWrite(actor, 'message:delete');
       const { membership } = await messageInGroup(messageId, actor);
       requireWritable(membership);
       const outcome = await repo.applyRevoke({ messageId, actorId: actor, moderator: isModerator(membership.role) });

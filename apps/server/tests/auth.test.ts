@@ -83,6 +83,17 @@ class MemoryAuthRepository implements AuthRepository {
     session.revokedAt = now;
     session.revokedReason = 'logout';
   }
+
+  async revokeAllForUser(userId: string, now: Date): Promise<number> {
+    // Mirrors the real UPDATE: only live sessions count, so calling it twice
+    // must not report the same session twice.
+    const live = this.sessions.filter((row) => row.userId === userId && row.revokedAt === null);
+    for (const row of live) {
+      row.revokedAt = now;
+      row.revokedReason = 'logout';
+    }
+    return live.length;
+  }
 }
 
 function repository() {

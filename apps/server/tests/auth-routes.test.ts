@@ -26,6 +26,10 @@ function service(): AuthRouteService & { calls: string[] } {
         user: { id: '1', username: 'worker', displayName: '工友' },
       };
     },
+    logoutAll: async () => {
+      calls.push('logout-all');
+      return 2;
+    },
     logout: async (refreshToken) => {
       calls.push(`logout:${refreshToken}`);
     },

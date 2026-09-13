@@ -170,5 +170,19 @@ export function createAuthRepository(database: Database): AuthRepository {
         [now, session.id],
       );
     },
+
+    async revokeAllForUser(userId, now) {
+      // Returns how many actually went away, which is what 5.2 promises as
+      // revokedCount - and it must not re-revoke rows already revoked, or the
+      // number would silently count the same session on every call.
+      const result = await database.query<Row>(
+        `UPDATE sessions
+            SET revoked_at = $1, revoked_reason = 'logout'
+          WHERE user_id = $2 AND revoked_at IS NULL
+          RETURNING id`,
+        [now, userId],
+      );
+      return result.rows.length;
+    },
   };
 }

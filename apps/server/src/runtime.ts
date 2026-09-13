@@ -21,6 +21,7 @@ import type { MessagesService } from './messages/service.js';
 import { registerHealthRoutes, type Readiness } from './health.js';
 import { registerSyncRoutes } from './sync/routes.js';
 import type { SyncService } from './sync/service.js';
+import type { RateLimiter } from './http/rate-limit.js';
 
 export type RuntimeOptions = {
   jwtSecret: Uint8Array;
@@ -35,6 +36,8 @@ export type RuntimeOptions = {
   sync?: SyncService;
   /** Where committed writes go; attached to the rooms below. */
   bus?: MessageBus;
+  /** Shared by routes and services; absent only in tests that pin no policy. */
+  limiter?: RateLimiter;
 };
 
 export type Runtime = {
@@ -77,7 +80,11 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
   });
 
   await registerHealthRoutes(app, { getReadiness: options.getReadiness });
-  if (options.auth) await registerAuthRoutes(app, options.auth);
+  if (options.auth)
+    await registerAuthRoutes(app, options.auth, {
+      limiter: options.limiter,
+      requireAuth: createAuthenticator(options.jwtSecret),
+    });
   if (options.groups) await registerGroupRoutes(app, options.groups, createAuthenticator(options.jwtSecret));
   if (options.messages) await registerMessageRoutes(app, options.messages, createAuthenticator(options.jwtSecret));
   if (options.sync) await registerSyncRoutes(app, options.sync, createAuthenticator(options.jwtSecret));

@@ -1,5 +1,6 @@
 import type { GroupDto, GroupRole, GroupUpdate, GroupCreate, LastMessagePreview } from '@gongyouquan/contracts';
-import { HttpError } from '../http/errors.js';
+import { HttpError, RateLimitedError } from '../http/errors.js';
+import { LIMITS, type RateLimiter } from '../http/rate-limit.js';
 import { requireMembership, requireRole, requireWritable, type GroupAccess, type GroupMembership } from './guards.js';
 
 export type GroupRecord = {
@@ -52,7 +53,22 @@ function toDto(group: GroupRecord): GroupDto {
   };
 }
 
-export function createGroupsService(repo: GroupsRepository) {
+export type GroupsServiceOptions = {
+  /** Same reasoning as the messages service: one policy, not one per transport. */
+  limiter?: RateLimiter;
+};
+
+export function createGroupsService(repo: GroupsRepository, options: GroupsServiceOptions = {}) {
+  function gateWrite(actor: string, what: string): void {
+    const limiter = options.limiter;
+    if (!limiter) return;
+    const decision = limiter.take(
+      `write:${what}:${actor}`,
+      LIMITS.otherWritesPerUser.limit,
+      LIMITS.otherWritesPerUser.windowMs,
+    );
+    if (!decision.allowed) throw new RateLimitedError(decision.retryAfterSeconds, what);
+  }
   /** Reads must not reveal group existence to strangers (spec 8.1 NOT_FOUND covers "不可见"). */
   async function readMembershipOrHidden(groupId: string, userId: string): Promise<GroupMembership> {
     const membership = await repo.getMembership(groupId, userId);
@@ -62,6 +78,7 @@ export function createGroupsService(repo: GroupsRepository) {
 
   return {
     async create(actor: string, input: GroupCreate): Promise<GroupDto> {
+      gateWrite(actor, 'group:create');
       return toDto(await repo.createGroup({ name: input.name, description: input.description ?? null, ownerId: actor }));
     },
 
@@ -83,6 +100,7 @@ export function createGroupsService(repo: GroupsRepository) {
     },
 
     async update(actor: string, groupId: string, input: GroupUpdate): Promise<GroupDto> {
+      gateWrite(actor, 'group:update');
       if (!(await repo.getGroup(groupId))) throw new HttpError('NOT_FOUND');
       const membership = await requireMembership(repo, groupId, actor);
       requireRole(membership, ['owner', 'admin']);
