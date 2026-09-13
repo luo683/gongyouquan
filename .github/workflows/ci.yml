@@ -2,9 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      # Feature branches get verified on every push; without this the branch
+      # that carries the work is never run through the gate at all.
+      - 'feat/**'
   pull_request:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
   quality:
@@ -25,12 +30,59 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        if: ${{ hashFiles('pnpm-lock.yaml') != '' }}
         run: pnpm install --frozen-lockfile
 
-      - name: Workspace checks
-        run: |
-          pnpm run check:workspace
-          pnpm run lint
-          pnpm run typecheck
-          pnpm run test
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm run test
+
+  # The real-PostgreSQL gate (docs/specs/01 §9.4). `quality` above stays
+  # network-free and fast; this job is the only one that ever opens a socket
+  # to a database, and it is the only place the DDL is actually executed.
+  integration:
+    needs: quality
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: gyq
+          POSTGRES_PASSWORD: gyq_ci_pw
+          POSTGRES_DB: gyq_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gyq -d gyq_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      INTEGRATION_DATABASE_URL: postgres://gyq:gyq_ci_pw@localhost:5432/gyq_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Same command as `quality`, but with INTEGRATION_DATABASE_URL set the
+      # 18 gated cases run instead of skipping. Migration is applied here for
+      # the first time in CI, then re-applied by the no-op assertion.
+      - name: Tests against real PostgreSQL
+        run: pnpm run test

@@ -1,0 +1,30 @@
+# Local PostgreSQL for 工友圈 development and the real-database test gate.
+#
+#   docker compose -f infra/db/docker-compose.yml up -d
+#   docker compose -f infra/db/docker-compose.yml down      # keeps the volume
+#   docker compose -f infra/db/docker-compose.yml down -v   # throws it away
+#
+# Port 55432 on the host so this never collides with a locally installed PG.
+services:
+  postgres:
+    # docker.io is unreachable from at least one dev machine in this project;
+    # the daocloud mirror serves the identical image. Switch back to
+    # `postgres:17-alpine` when Docker Hub works again.
+    image: docker.m.daocloud.io/library/postgres:17-alpine
+    container_name: gyq-pg
+    environment:
+      POSTGRES_USER: gyq
+      POSTGRES_PASSWORD: gyq_dev_pw
+      POSTGRES_DB: gyq_dev
+    ports:
+      - '55432:5432'
+    volumes:
+      - gyq-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U gyq -d gyq_dev']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  gyq-pgdata:
