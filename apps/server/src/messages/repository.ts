@@ -143,6 +143,7 @@ export type MessageRepository = {
   applyEdit(input: { messageId: string; actorId: string; body: string }): Promise<EditOutcome>;
   applyRevoke(input: { messageId: string; actorId: string; moderator: boolean }): Promise<RevokeOutcome>;
   listBefore(input: { groupId: string; beforeSeq: number | null; limit: number }): Promise<{ items: MessageDto[]; hasMore: boolean }>;
+  listAfter(input: { groupId: string; sinceSeq: number; limit: number }): Promise<{ items: MessageDto[]; hasMore: boolean }>;
 };
 
 export function createMessagesRepository(database: QueryClient): MessageRepository {
@@ -295,6 +296,25 @@ export function createMessagesRepository(database: QueryClient): MessageReposito
       });
     },
 
+    async listAfter({ groupId, sinceSeq, limit }) {
+      // The replay half of the same reader: ascending from the client watermark,
+      // one extra row so hasMore needs a second query. Rows come back in their
+      // CURRENT state, revoked and edited included - spec 4.3.5 forbids replaying
+      // events here, because an out-of-order revoke would target a message the
+      // client has not seen yet and be silently dropped.
+      const result = await database.query<Row>(
+        `SELECT ${messageColumns('m')}
+           FROM messages m
+          WHERE m.group_id = $1 AND m.seq > $2
+          ORDER BY m.seq ASC
+          LIMIT $3`,
+        [groupId, sinceSeq, limit + 1],
+      );
+      return {
+        items: result.rows.slice(0, limit).map(messageFromRow),
+        hasMore: result.rows.length > limit,
+      };
+    },
     async listBefore({ groupId, beforeSeq, limit }) {
       // Newest-first fetch, ascending return: 向前翻历史 without ever reversing
       // the payload, so the client can upsert the page exactly as it arrives.

@@ -6,6 +6,9 @@ import { createGroupsRepository } from './groups/repository.js';
 import { createGroupsService } from './groups/service.js';
 import { createMessagesRepository } from './messages/repository.js';
 import { createMessagesService } from './messages/service.js';
+import { createMessageBus } from './messages/bus.js';
+import { createSyncRepository } from './sync/repository.js';
+import { createSyncService } from './sync/service.js';
 import { buildApp, type Runtime, type RuntimeOptions } from './runtime.js';
 import { parseEnv, type ServerEnv } from './config/env.js';
 
@@ -15,7 +18,17 @@ export type StartOptions = {
   runtime?: RuntimeOptions;
 };
 
+/**
+ * The spec wants the first 8 chars of the contracts build hash. Nothing stamps
+ * that at build time yet, so this literal is the honest placeholder: hello still
+ * carries a version, and clients still get a stable value to compare.
+ */
+const CONTRACT_VERSION_FALLBACK = 'dev-nohash';
+
 function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptions {
+  const groupsRepo = createGroupsRepository(database);
+  const messagesRepo = createMessagesRepository(database);
+  const bus = createMessageBus();
   return {
     jwtSecret: new TextEncoder().encode(env.jwtSecret),
     contractVersion: env.contractVersion,
@@ -30,18 +43,22 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
         },
       };
     },
-    getGroupSyncState: async () => null,
     auth: createAuthService({
       repo: createAuthRepository(database),
       jwtSecret: env.jwtSecret,
     }),
-    groups: createGroupsService(createGroupsRepository(database)),
-    // The messages service reads membership through the groups repository on
-    // purpose: one guard implementation, not a second copy that can drift.
-    messages: createMessagesService(
-      createMessagesRepository(database),
-      createGroupsRepository(database),
-    ),
+    groups: createGroupsService(groupsRepo),
+    // One shared bus: the write path publishes here after COMMIT and buildApp
+    // attaches the Socket.IO emitter to it, so nothing in src/messages needs to
+    // know what a room is.
+    bus,
+    messages: createMessagesService(messagesRepo, groupsRepo, { publish: bus.publish }),
+    // Membership is read through the groups repository on purpose: one guard
+    // implementation, not a second copy that can drift.
+    sync: createSyncService({
+      repo: createSyncRepository(database, messagesRepo),
+      contractVersion: env.contractVersion ?? CONTRACT_VERSION_FALLBACK,
+    }),
   };
 }
 

@@ -1,22 +1,40 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { jwtVerify } from 'jose';
 import { Server as SocketIOServer, type Socket } from 'socket.io';
+import {
+  messageDeleteSchema,
+  messageEditSchema,
+  messageSendSchema,
+  readUpdateSchema,
+  syncHelloSchema,
+  syncPullSchema,
+  type MessageDto,
+} from '@gongyouquan/contracts';
 import { registerAuthRoutes, type AuthRouteService } from './auth/routes.js';
 import { createAuthenticator } from './http/auth.js';
+import { HttpError } from './http/errors.js';
 import { registerGroupRoutes } from './groups/routes.js';
 import { registerMessageRoutes } from './messages/routes.js';
+import type { MessageBus } from './messages/bus.js';
 import type { GroupsService } from './groups/service.js';
 import type { MessagesService } from './messages/service.js';
 import { registerHealthRoutes, type Readiness } from './health.js';
+import { registerSyncRoutes } from './sync/routes.js';
+import type { SyncService } from './sync/service.js';
 
 export type RuntimeOptions = {
   jwtSecret: Uint8Array;
   contractVersion?: string;
   getReadiness: () => Promise<Readiness>;
-  getGroupSyncState: (input: { groupId: string; userId: string }) => Promise<{ lastSeq: number } | null>;
+  /** Only used by the socket tests that never stand up a database. */
+  getGroupSyncState?: (input: { groupId: string; userId: string }) => Promise<{ lastSeq: number } | null>;
   auth?: AuthRouteService;
   groups?: GroupsService;
   messages?: MessagesService;
+  /** Real watermarks and replay. When absent, hello falls back to getGroupSyncState. */
+  sync?: SyncService;
+  /** Where committed writes go; attached to the rooms below. */
+  bus?: MessageBus;
 };
 
 export type Runtime = {
@@ -62,6 +80,7 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
   if (options.auth) await registerAuthRoutes(app, options.auth);
   if (options.groups) await registerGroupRoutes(app, options.groups, createAuthenticator(options.jwtSecret));
   if (options.messages) await registerMessageRoutes(app, options.messages, createAuthenticator(options.jwtSecret));
+  if (options.sync) await registerSyncRoutes(app, options.sync, createAuthenticator(options.jwtSecret));
 
   io.use(async (socket, next) => {
     try {
@@ -75,39 +94,122 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
 
   io.on('connection', (rawSocket) => {
     const socket = rawSocket as AuthenticatedSocket;
-    socket.join(`user:${socket.data.userId}`);
+    const userId = socket.data.userId;
+    socket.join('user:' + userId);
+
+    /**
+     * Every handler answers with either the contract payload or a wsErrorPayload,
+     * never a bare Error, so the client can map a code to Chinese copy instead of
+     * parsing English text.
+     */
+    async function call<T>(ack: ((value: unknown) => void) | undefined, fn: () => Promise<T>): Promise<void> {
+      if (typeof ack !== 'function') return;
+      try {
+        ack(await fn());
+      } catch (error) {
+        const code = error instanceof HttpError ? error.code : 'INTERNAL_ERROR';
+        if (!(error instanceof HttpError)) console.error('unhandled socket error', error);
+        ack({ error: { code, message: code.toLowerCase().replaceAll('_', ' ') } });
+      }
+    }
+
+    function follow(groupId: string): void {
+      socket.join('group:' + groupId);
+    }
 
     socket.on('sync:hello', async (payload: unknown, ack?: (value: unknown) => void) => {
-      if (typeof ack !== 'function') return;
-      const groups = Array.isArray((payload as { groups?: unknown } | null)?.groups)
-        ? (payload as { groups: Array<{ groupId?: unknown }> }).groups
-        : [];
-      const authorizedGroups: Array<{ groupId: string; lastSeq: number }> = [];
+      await call(ack, async () => {
+        const parsed = syncHelloSchema.safeParse(payload);
+        if (!parsed.success) throw new HttpError('INVALID_ARGUMENT');
 
-      for (const group of groups) {
-        if (typeof group?.groupId !== 'string') continue;
-        const state = await options.getGroupSyncState({
-          groupId: group.groupId,
-          userId: socket.data.userId,
-        });
-        if (state) {
-          authorizedGroups.push({ groupId: group.groupId, lastSeq: state.lastSeq });
-          socket.join(`group:${group.groupId}`);
+        if (options.sync) {
+          const ready = await options.sync.hello(userId, parsed.data);
+          // Joining here is what makes the acknowledgement and the room list the
+          // same answer: a group the caller is not in is neither reported nor joined.
+          for (const group of ready.groups) follow(group.groupId);
+          socket.emit('sync:ready', ready);
+          return ready;
         }
-      }
 
-      const result = {
-        groups: authorizedGroups,
-        contractVersion: options.contractVersion,
-      };
-      ack(result);
-      socket.emit('sync:ready', result);
+        const authorized: Array<{ groupId: string; lastSeq: number }> = [];
+        for (const group of parsed.data.groups) {
+          const state = await options.getGroupSyncState?.({ groupId: group.groupId, userId });
+          if (state) {
+            authorized.push({ groupId: group.groupId, lastSeq: state.lastSeq });
+            follow(group.groupId);
+          }
+        }
+        const ready = { groups: authorized, contractVersion: options.contractVersion ?? 'unversioned' };
+        socket.emit('sync:ready', ready);
+        return ready;
+      });
     });
+
+    socket.on('sync:pull', async (payload: unknown, ack?: (value: unknown) => void) => {
+      await call(ack, async () => {
+        if (!options.sync) throw new HttpError('INTERNAL_ERROR');
+        const parsed = syncPullSchema.safeParse(payload);
+        if (!parsed.success) throw new HttpError('INVALID_ARGUMENT');
+        follow(parsed.data.groupId);
+        return options.sync.pull(userId, parsed.data);
+      });
+    });
+
+    socket.on('read:update', async (payload: unknown, ack?: (value: unknown) => void) => {
+      await call(ack, async () => {
+        if (!options.sync) throw new HttpError('INTERNAL_ERROR');
+        const parsed = readUpdateSchema.safeParse(payload);
+        if (!parsed.success) throw new HttpError('INVALID_ARGUMENT');
+        const position = await options.sync.read(userId, parsed.data);
+        // Peers refresh their receipt counts off this; the sender needs no echo.
+        socket.to('group:' + parsed.data.groupId).emit('read:updated', {
+          groupId: parsed.data.groupId,
+          userId,
+          lastReadSeq: position.lastReadSeq,
+        });
+        return position;
+      });
+    });
+
+    socket.on('message:send', async (payload: unknown, ack?: (value: unknown) => void) => {
+      await call(ack, async () => {
+        if (!options.messages) throw new HttpError('INTERNAL_ERROR');
+        const parsed = messageSendSchema.safeParse(payload);
+        if (!parsed.success) throw new HttpError('INVALID_ARGUMENT');
+        follow(parsed.data.groupId);
+        return options.messages.send(userId, parsed.data);
+      });
+    });
+
+    socket.on('message:edit', async (payload: unknown, ack?: (value: unknown) => void) => {
+      await call(ack, async () => {
+        if (!options.messages) throw new HttpError('INTERNAL_ERROR');
+        const parsed = messageEditSchema.safeParse(payload);
+        if (!parsed.success) throw new HttpError('INVALID_ARGUMENT');
+        return { message: await options.messages.edit(userId, parsed.data.messageId, parsed.data.body) };
+      });
+    });
+
+    socket.on('message:delete', async (payload: unknown, ack?: (value: unknown) => void) => {
+      await call(ack, async () => {
+        if (!options.messages) throw new HttpError('INTERNAL_ERROR');
+        const parsed = messageDeleteSchema.safeParse(payload);
+        if (!parsed.success) throw new HttpError('INVALID_ARGUMENT');
+        await options.messages.revoke(userId, parsed.data.messageId);
+        return { ok: true };
+      });
+    });
+  });
+
+  // Live fan-out. Attached once per process; rooms are joined in sync:hello above.
+  const detach = options.bus?.attach((event: string, message: MessageDto) => {
+    io.to('group:' + message.groupId).emit(event, message);
   });
 
   let closePromise: Promise<void> | undefined;
   const close = (): Promise<void> => {
     closePromise ??= (async () => {
+      detach?.();
       await closeSocketServer(io);
       try {
         await app.close();

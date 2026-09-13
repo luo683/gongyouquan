@@ -214,6 +214,10 @@ export const messageEditSchema = z.object({
 });
 export type MessageEdit = z.infer<typeof messageEditSchema>;
 
+/** WS `message:delete` payload (spec event table: `{messageId}` -> `{ok: true}`). */
+export const messageDeleteSchema = z.object({ messageId: entityIdSchema });
+export type MessageDelete = z.infer<typeof messageDeleteSchema>;
+
 export const messageEditBodySchema = z.object({ body: z.string().min(1).max(4000) });
 export type MessageEditBody = z.infer<typeof messageEditBodySchema>;
 
@@ -257,6 +261,17 @@ export const syncPullSchema = z.object({
   limit: z.number().int().min(1).max(200).default(200),
 });
 export type SyncPull = z.infer<typeof syncPullSchema>;
+
+/**
+ * The HTTP fallback takes the same page over a query string, where every value
+ * arrives as text. Coercion lives here rather than in syncPullSchema so the WS
+ * path keeps rejecting a JSON string where a number belongs.
+ */
+export const syncPullQuerySchema = z.object({
+  sinceSeq: z.coerce.number().int().nonnegative().default(0),
+  limit: z.coerce.number().int().min(1).max(200).default(200),
+});
+export type SyncPullQuery = z.infer<typeof syncPullQuerySchema>;
 
 /**
  * `asOfSeq` is computed by the server, never by the client (spec 4.3.3):

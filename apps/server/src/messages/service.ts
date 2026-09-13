@@ -20,7 +20,32 @@ function isModerator(role: GroupRole): boolean {
   return MODERATOR_ROLES.includes(role);
 }
 
-export function createMessagesService(repo: MessageRepository, groups: MessagesGroupAccess) {
+/**
+ * Realtime fan-out, fired after the write transaction has committed.
+ *
+ * There is no outbox dispatcher in this build, so a crash between COMMIT and
+ * publish can drop a live event. That is accepted here rather than papered over
+ * because the recovery path for a missed event already exists and is what sync:pull
+ * is for: a client that never got message:new still converges on reconnect.
+ * Registering the delivery in 6.9's outbox worker is the follow-up that removes the
+ * window entirely.
+ */
+export type MessagePublisher = (event: MessageEvent, message: MessageDto) => void | Promise<void>;
+
+export type MessageEvent = 'message:new' | 'message:updated' | 'message:deleted';
+
+export type MessagesServiceOptions = {
+  publish?: MessagePublisher;
+};
+
+export function createMessagesService(
+  repo: MessageRepository,
+  groups: MessagesGroupAccess,
+  options: MessagesServiceOptions = {},
+) {
+  const publish = async (event: MessageEvent, message: MessageDto): Promise<void> => {
+    if (options.publish) await options.publish(event, message);
+  };
   /** Membership first, then the archived write gate. Reads never pass through here. */
   async function writableMembership(groupId: string, actor: string): Promise<GroupMembership> {
     if (!(await groups.getGroup(groupId))) throw new HttpError('NOT_FOUND');
@@ -56,6 +81,9 @@ export function createMessagesService(repo: MessageRepository, groups: MessagesG
         clientMsgId: input.clientMsgId,
         body: input.body,
       });
+      // A deduplicated hit is not a new message: republishing it would make every
+      // receiver render the same bubble twice.
+      if (outcome.kind === 'created') await publish('message:new', outcome.message);
       return { message: outcome.message, deduplicated: outcome.kind === 'duplicate' };
     },
 
@@ -67,6 +95,10 @@ export function createMessagesService(repo: MessageRepository, groups: MessagesG
       const outcome = await repo.applyEdit({ messageId, actorId: actor, body });
       switch (outcome.kind) {
         case 'edited':
+          // Full DTO, never a diff (spec 4.3.4): the receiver decides whether it
+          // wins over its own copy using updatedAt, which only works if the event
+          // is self-contained and applying it twice changes nothing.
+          await publish('message:updated', outcome.message);
           return outcome.message;
         case 'notFound':
           throw new HttpError('NOT_FOUND');
@@ -89,7 +121,11 @@ export function createMessagesService(repo: MessageRepository, groups: MessagesG
       const outcome = await repo.applyRevoke({ messageId, actorId: actor, moderator: isModerator(membership.role) });
       switch (outcome.kind) {
         case 'revoked':
+          await publish('message:deleted', outcome.message);
+          return;
         case 'alreadyRevoked':
+          // Nothing changed, so nothing is re-broadcast; a replayed DELETE stays
+          // silent rather than flashing the receiver again.
           return;
         case 'notFound':
           throw new HttpError('NOT_FOUND');
