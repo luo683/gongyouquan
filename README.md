@@ -14,7 +14,11 @@
 - `groups` 切片：群创建/列表/详情/成员查询/群信息修改，`FORBIDDEN_NOT_MEMBER` 与 `FORBIDDEN_ROLE`
   分离，归档群读放行、写 `409 GROUP_ARCHIVED`
 - 尚未接入：成员管理写接口、邀请码管理、messages/sync/tasks、浏览器端、Electron、部署与运维
-- 真实 PostgreSQL 验证仍被网络阻塞（见 `docs/decisions/0002`），不要把当前仓库当作可部署版本
+- 真实 PostgreSQL 验证**已完成**（PG 17.11）：建库、迁移连跑两次为 no-op、checksum 防篡改、auth/groups 的 SQL 真跑，
+  固化为 `apps/server/tests/integration/database.test.ts`（18 个用例，由 `INTEGRATION_DATABASE_URL` 开关；不设则该文件整体 skip）
+- 本地起库：`docker compose -f infra/db/docker-compose.yml up -d`（宿主端口 55432；镜像走 daocloud 源，Docker Hub 在本机不可达）
+- 真库首跑暴露的 6 条矛盾与缺口登记在 `docs/decisions/0005`，其中一条推翻说明书 4.2 关于 seq 空洞的论断
+- 仍未接入部署与运维，**不要把它当作可部署版本**
 
 ## 目录约定
 

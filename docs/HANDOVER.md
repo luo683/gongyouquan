@@ -9,7 +9,7 @@
 
 ## 1. 一句话现状
 
-后端骨架和 `auth`、`groups` 两个垂直切片已经落地并有测试覆盖；**数据库从未在真实 PostgreSQL 上跑过**，业务只完成了很小一部分，当前**不可部署、不可演示**。
+后端骨架和 `auth`、`groups` 两个垂直切片已经落地并有测试覆盖；`0001_init.sql` 已在 **真实 PostgreSQL 17.11** 上建库通过、迁移重复执行验证为 no-op（见 `docs/decisions/0005`）。业务只完成了很小一部分，当前仍**不可部署、不可演示**——缺的是 messages/sync/tasks、前端与运维，不再是数据库。
 
 ---
 
@@ -35,7 +35,11 @@ ab7a4c0 feat(server): add socket runtime bootstrap
 7361672 feat(server): add runtime and database foundation
 015fde8 feat(auth): add invite login and refresh rotation
 0ac2666 feat(groups): add membership guards and group crud
+c88068c fix(contracts): add error codes the server mapping can emit
+051eb26 docs: add project handover
 ```
+
+交接之后又推进了一批（真实数据库验证 + CI 补盲），见 `git log -1 --stat` 与 `docs/decisions/0005`。
 
 ---
 
@@ -87,15 +91,29 @@ ab7a4c0 feat(server): add socket runtime bootstrap
 
 ```text
 packages/contracts   3 文件 / 12 用例
-apps/server         10 文件 / 35 用例
-合计                13 文件 / 47 用例，全绿
+apps/server         11 文件 / 53 用例（其中 18 个需要真实数据库）
+合计                14 文件 / 65 用例，全绿
 ```
+
+### 真实数据库闸门
+
+`apps/server/tests/integration/database.test.ts` 是仓库里唯一会连真库的测试。
+由 `INTEGRATION_DATABASE_URL` 控制：不设这个变量时 18 个用例整体 skip，
+所以 `pnpm test` 在没有任何数据库的机器上依然全绿。跑它：
+
+```bash
+docker compose -f infra/db/docker-compose.yml up -d
+INTEGRATION_DATABASE_URL="postgres://gyq:gyq_dev_pw@localhost:55432/gyq_dev" \
+  pnpm --filter @gongyouquan/server test
+```
+
+PowerShell 用 `$env:INTEGRATION_DATABASE_URL="..."` 单独一行。用例跑完会把自己造的数据清干净，可以对同一个库反复跑。
 
 ---
 
 ## 5. 还没做到的（按重要性）
 
-1. **真实 PostgreSQL 验证** —— 迁移、DDL、auth/groups 的 SQL 都没在真库上跑过。
+1. ~~真实 PostgreSQL 验证~~ **已完成**（2026-09-13）—— 建库、迁移幂等、checksum 防篡改、auth/groups 的 SQL 都已在 PG 17.11 上跑过，并固化成测试。数据库这边只剩说明书 1685 行要求的 `EXPLAIN (ANALYZE, BUFFERS)` + 几千行样例数据。
 2. **成员管理与邀请码接口** —— 踢人 / 加人（复活）/ 改角色 / 转让群主 / 邀请码增删查。
 3. **限流**（login 双维度、register、refresh 全缺）、`logout-all`、refresh Cookie 清除响应。
 4. **messages / sync / tasks / files / search / ops** —— 说明书第 4 节说消息同步占 70% 复杂度，一行没写。
@@ -116,6 +134,14 @@ pnpm --filter @gongyouquan/server test        # 只跑服务端
 pnpm --filter @gongyouquan/contracts test     # 只跑契约
 ```
 
+真实数据库闸门（不设 `INTEGRATION_DATABASE_URL` 时那 18 个用例整体 skip）：
+
+```bash
+docker compose -f infra/db/docker-compose.yml up -d      # postgres:17-alpine，宿主端口 55432
+INTEGRATION_DATABASE_URL="postgres://gyq:gyq_dev_pw@localhost:55432/gyq_dev" \
+  pnpm --filter @gongyouquan/server test
+```
+
 服务端启动（**需要先有可用的 PostgreSQL**）：
 
 ```bash
@@ -131,11 +157,11 @@ pnpm --filter @gongyouquan/server dev
 
 `.github/workflows/ci.yml`：单 job，ubuntu-latest，node 22，pnpm 9.15.9，依次跑 `check:workspace` → `lint` → `typecheck` → `test`。
 
-三个盲区，交接后请优先处理：
+盲区 1、2 已修，3 仍在：
 
-1. **CI 只在 `main` 的 push 和 PR 上触发** —— `feat/*` 推上去不会跑，当前开发分支从未被 CI 验证过。
-2. **CI 里没有 PostgreSQL** —— 所以「真实数据库未验证」这件事，CI 永远不会替你发现，它只会一路绿灯。
-3. **`lint` 空转**（见第 5 节第 7 条）。
+1. ~~CI 只在 `main` 触发~~ **已修** —— `push.branches` 加了 `'feat/**'`（带引号：裸 `**` 在 YAML 1.1 里有被当别名解析的风险）。
+2. ~~CI 里没有 PostgreSQL~~ **已修** —— 新增 `integration` job，`needs: quality`，带 `postgres:17-alpine` service 容器与 `pg_isready` 健康检查。`INTEGRATION_DATABASE_URL` 只在这个 job 里设，`quality` 保持不联网、快、稳。
+3. **`lint` 仍然空转**（见第 5 节第 7 条）—— 仓库锁定的 388 个依赖里没有任何 linter，装一个要动 `pnpm-lock.yaml`，留作独立提交。
 
 ---
 
@@ -146,9 +172,10 @@ pnpm --filter @gongyouquan/server dev
 | 文件 | 关键内容 |
 |---|---|
 | `0001-project-baseline.md` | 基线约定（accepted）。注意：其中「lockfile 待生成」一条已过期 |
-| `0002-database-spec-clarifications.md` | 5 处矛盾：DDL 执行范围、软删除 vs `ON DELETE CASCADE`、搜索索引范围、索引数量、容量估算 |
+| `0002-database-spec-clarifications.md` | 5 处矛盾：DDL 执行范围、软删除 vs `ON DELETE CASCADE`、搜索索引范围、索引数量、容量估算。（末节「当前验证状态」已于 2026-09-13 改写为已完成） |
 | `0003-auth-contract-clarifications.md` | `AUTH_INVALID_CREDENTIALS` 不在错误码表、邀请码 role 落点、注册事务边界 |
 | `0004-groups-guards-and-archival.md` | guard 是否看归档态（224 行 vs 236 行自相矛盾）、归档群 PATCH 未定义、非成员读返回 403 还是 404 |
+| `0005-real-database-findings.md` | 真库首跑暴露 6 条：**回滚不产生 seq 空洞（推翻说明书 4.2 与验收表第 2 项）**、未读不排除撤回消息、预览与未读对 `system` 口径不一致、硬删群连撤回留痕一起清掉、`files.uploader_id` 无级联、1685 行的计划验证仍未做 |
 
 几个已经拍死、**改之前先看 decision** 的行为：
 
@@ -167,27 +194,29 @@ pnpm --filter @gongyouquan/server dev
 | Node（本机） | `v24.16.0` —— **超出范围**，每次 pnpm 调用都会刷 `Unsupported engine` 警告 |
 | pnpm | 全局 11.10.0，仓库内被 `packageManager` 钉到 9.15.9（与 CI 一致） |
 | Docker 引擎 | 可用（ServerVersion 29.7.2） |
-| PostgreSQL 镜像 | **拿不到** —— `registry-1.docker.io` 连接超时，`postgres:17.2-alpine` 无法拉取 |
-| 本机 psql | 未安装，不在 PATH |
+| PostgreSQL 镜像 | 已解决 —— `registry-1.docker.io` 依旧超时，改走 `docker.m.daocloud.io` 镜像源后 `postgres:17-alpine` 已在本地（容器内是 **PG 17.11**） |
+| 运行中的数据库 | `gyq-pg` 容器，宿主端口 **55432**（避开本机可能已装的 5432），由 `infra/db/docker-compose.yml` 管理 |
+| 本机 psql | 未安装，不在 PATH —— 需要时用 `docker exec gyq-pg psql -U gyq -d gyq_dev` |
 | Shell 路径 | 工作目录是 `\\?\E:\工友圈` 形式，个别命令会报 `EISDIR: lstat 'E:'`，换普通盘符路径可绕过 |
 
-**结论**：真实数据库验证被网络阻塞，不是代码问题。要么解决 Docker registry 访问，要么装本地 PostgreSQL，要么在 CI 里加一个 Postgres service 容器（推荐，能顺便补上第 7 节的盲区 2）。
+**结论（已更新）**：数据库不再是阻塞项。镜像换 daocloud 源即可，CI 侧已加 Postgres service 容器。现在唯一还没解决的环境问题是 **Node 版本**：本机只有 v24.16.0，仓库要求 `>=22 <23`；没有版本管理器，但 `C:/Users/ROG/AppData/Local/hermes/node22/node-v22.23.1-win-x64/` 下躺着一份现成可用的 v22.23.1。
 
 ---
 
 ## 10. 接手后建议的第一步
 
-1. 切到 Node 22（`nvm use 22` 或等效），消掉引擎警告。
-2. 在 CI 里加 PostgreSQL service，并把 CI 触发条件扩展到 `feat/*`（第 7 节盲区 1、2）。
-3. 让真实的 `0001_init.sql` 在 PG 17 上跑一次，迁移连跑两次验证第二次是 no-op —— 这是 `docs/specs/01-后端说明书.md` 第 9.4 节要求的验收，目前完全没做。
-4. 补 `groups` 的成员管理写接口（说明书 3.4 权限矩阵是最容易出错的地方：admin 不能踢 owner、不能踢同级 admin、只有 owner 能改角色）。
-5. 再往 `messages` 走 —— 那是说明书里复杂度最高的模块，`seq` 分配器、空洞、`asOfSeq`、补投竞态都在那里。
+1. ~~CI 加 PostgreSQL service + 扩展到 `feat/*`~~ **已做**。
+2. ~~真实迁移在 PG 17 上跑通、连跑两次验证第二次 no-op~~ **已做**（§9.4 那条验收），并固化成 `tests/integration/database.test.ts` 的 18 个用例。
+3. 切到 Node 22（上面那条路径直接可用，或装个版本管理器），消掉 `Unsupported engine` 警告。
+4. 拍板 `docs/decisions/0005` 的六条——尤其**矛盾一**：说明书 4.2 断言回滚会留下 seq 空洞，验收表第 2 项要求「构造回滚事务 → 后续 seq 有跳跃」，但真库证明当前 `alloc_group_seq` 的写法做不到这件事。`asOfSeq` 那条「基石」的验收怎么写，取决于这个决定。
+5. 补 `groups` 的成员管理写接口（说明书 3.4 权限矩阵是最容易出错的地方：admin 不能踢 owner、不能踢同级 admin、只有 owner 能改角色）。集成测试已经替我们踩过一次：`group_members` 主键是 `(group_id, user_id)`，被踢成员**复活只能 UPDATE 原行**，再 INSERT 直接撞主键。
+6. 再往 `messages` 走 —— 那是说明书里复杂度最高的模块，`seq` 分配器、空洞、`asOfSeq`、补投竞态都在那里。
 
 ---
 
 ## 11. 最容易踩的坑
 
-1. **`messages.seq` 会因事务回滚留下永久空洞**，客户端必须无条件相信 `sync:pull` 返回的 `asOfSeq`，不能要求连续。
+1. 客户端必须无条件相信 `sync:pull` 返回的 `asOfSeq`，不能要求 `seq` 连续。**但原因和这份文档原来写的不一样**：真库实测 `alloc_group_seq` 回滚会把号原样归还（计数器更新与行锁同事务），不产生空洞；100 路并发分配也互不重复、无死锁。真正会让 `seq` 不连续的是群被硬删时 `ON DELETE CASCADE` 连整段消息一起清掉。详见 `docs/decisions/0005` 矛盾一与缺口四。
 2. **BIGINT 主键必须序列化成字符串**，前端禁止 `Number(id)`。
 3. **`clientMsgId` 在重试/降级/401 重放时必须复用**，否则弱网下产生重复消息。
 4. `errorEnvelope` 的 `message` 是英文、给日志看；中文文案由前端按 `code` 映射。
