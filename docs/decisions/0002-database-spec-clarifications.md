@@ -40,7 +40,12 @@
 
 ## 当前验证状态
 
+**2026-09-13 更新：本节列出的真实数据库验证已经完成**，见 `0005-real-database-findings.md`。
+
 - DDL 已从完整说明书原件提取，未修改原 SQL 内容。
-- 静态对象计数与说明书声明目标核对中。
-- 本机 Docker daemon 后来已启动，但拉取 `postgres:17.2-alpine` 时 Docker Desktop 无法连接 Docker Hub（HTTPS proxy/network error）；本机也没有可复用的 PostgreSQL 镜像，且 `psql`/`pg_isready` 不在 PATH。
-- 因此本轮只完成 SQL 静态检查、迁移执行器单测和代码类型检查；真实 PostgreSQL 建库、迁移重复执行和查询计划验证尚未完成，不能宣称通过。
+- `0001_init.sql` 已在 PostgreSQL 17.11 上真实建库通过，对象计数与说明书声明一致（22 表 / 4 函数 / 7 触发器 / 11 枚举）。
+- 迁移重复执行已验证为 no-op；篡改已应用迁移的 checksum 会被拒绝启动。
+- 查询计划验证**只做了局部**：`messages_body_trgm` 部分索引确认可被 trigram 查询命中；说明书第 1685 行要求的「每条 SQL + 几千行样例数据 + `EXPLAIN (ANALYZE, BUFFERS)`」仍未完成。
+- 本机拉取 `registry-1.docker.io` 依然超时，但 `postgres:17-alpine` 已通过 `docker.m.daocloud.io` 镜像源取得并固化为 `infra/db/docker-compose.yml`；CI 另有 `integration` job 使用 `postgres:17-alpine` service。
+
+原「因此本轮只完成 SQL 静态检查……不能宣称通过」一句作废。
