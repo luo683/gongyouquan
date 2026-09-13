@@ -1,0 +1,16 @@
+{
+  "name": "gongyouquan",
+  "version": "0.1.0",
+  "private": true,
+  "description": "工友圈：群聊与群内任务协作系统",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "check:workspace": "pnpm --recursive list --depth -1",
+    "test": "pnpm --recursive run test --if-present",
+    "typecheck": "pnpm --recursive run typecheck --if-present",
+    "lint": "pnpm --recursive run lint --if-present"
+  }
+}

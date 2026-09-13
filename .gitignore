@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Builds and coverage
+dist/
+build/
+out/
+coverage/
+.next/
+.vite/
+*.tsbuildinfo
+
+# Runtime and local data
+.env
+.env.*
+!.env.example
+*.log
+logs/
+.tmp/
+tmp/
+
+# Databases, uploads and local volumes
+*.sqlite
+*.sqlite3
+*.db
+postgres-data/
+pgdata/
+uploads/
+backups/
+
+# Secrets and local credentials
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Electron artifacts
+release/
+appout/
+
+# Test artifacts
+playwright-report/
+test-results/
+
+# Local agent and tool state
+.evox/
+.claude/
+.codex/
