@@ -4,13 +4,17 @@
 
 ## 当前状态
 
-项目刚完成 `m0-foundation` 初始化：
+后端基础与第一批业务切片已在 `feat/contracts-foundation` 分支推进：
 
-- 三份完整设计说明书已固化在 `docs/specs/`
-- 目标架构为 pnpm monorepo
-- 后端计划采用 Node.js 22、TypeScript、Fastify、Socket.IO、PostgreSQL
-- 前端计划采用 React、Vite、Ant Design，并由 Electron 承载桌面版
-- 业务实现尚未开始；不要把当前仓库当作可部署版本
+- 三份完整设计说明书已固化在 `docs/specs/`，矛盾与缺口登记在 `docs/decisions/`
+- `packages/contracts`：ID/时间/分页/错误/auth/groups 契约与测试
+- `apps/server`：`/healthz`、`/readyz`、启动配置校验、Fastify + Socket.IO 单进程入口、
+  PostgreSQL 连接池与幂等迁移执行器（`infra/db/migrations/0001_init.sql`，来自说明书 6.2+6.5）
+- `auth` 切片：邀请码注册、登录、Argon2id、refresh 轮换与重用检测、HttpOnly refresh Cookie、Bearer 鉴权
+- `groups` 切片：群创建/列表/详情/成员查询/群信息修改，`FORBIDDEN_NOT_MEMBER` 与 `FORBIDDEN_ROLE`
+  分离，归档群读放行、写 `409 GROUP_ARCHIVED`
+- 尚未接入：成员管理写接口、邀请码管理、messages/sync/tasks、浏览器端、Electron、部署与运维
+- 真实 PostgreSQL 验证仍被网络阻塞（见 `docs/decisions/0002`），不要把当前仓库当作可部署版本
 
 ## 目录约定
 
@@ -41,7 +45,7 @@ pnpm typecheck
 pnpm test
 ```
 
-当前尚未生成 `pnpm-lock.yaml`，因此在业务依赖加入前不执行 `pnpm install --frozen-lockfile`。见 `docs/decisions/0001-project-baseline.md`。
+锁文件已存在；CI 用 `pnpm install --frozen-lockfile` 复现同一依赖树。`pnpm test` / `pnpm typecheck` 会自动先构建 `packages/contracts`（见 `pretest` / `pretypecheck` 钩子）。服务端本地启动需要先有 PostgreSQL（见 `docs/decisions/0002-database-spec-clarifications.md` 的验证状态）。
 
 ## Git 提交约定
 

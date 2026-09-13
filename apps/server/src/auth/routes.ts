@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { authLoginSchema, authRefreshSchema, authRegisterSchema } from '@gongyouquan/contracts';
+import { errorEnvelope, statusForErrorCode } from '../http/errors.js';
 import { AuthError, type PublicUser } from './service.js';
 
 type AuthResult = {
@@ -35,21 +36,11 @@ function cookies(request: FastifyRequest): Record<string, string> {
 }
 
 function statusFor(code: string): number {
-  if (code === 'INVALID_ARGUMENT' || code === 'INVITE_INVALID') return 400;
-  if (code === 'AUTH_INVALID_CREDENTIALS' || code === 'REFRESH_INVALID' || code === 'REFRESH_REUSED') return 401;
-  if (code === 'ACCOUNT_DISABLED') return 403;
-  return 500;
+  return statusForErrorCode(code);
 }
 
 function errorResponse(request: FastifyRequest, code: string, details?: unknown) {
-  return {
-    error: {
-      code,
-      message: code.toLowerCase().replaceAll('_', ' '),
-      ...(details === undefined ? {} : { details }),
-      requestId: request.id,
-    },
-  };
+  return errorEnvelope(request, code, details);
 }
 
 async function run<T>(

@@ -2,6 +2,8 @@ import { pathToFileURL } from 'node:url';
 import { createAuthService } from './auth/service.js';
 import { createAuthRepository } from './auth/repository.js';
 import { createDatabase, checkDatabase, getOutboxLag, migrateDatabase, type Database } from './db/pool.js';
+import { createGroupsRepository } from './groups/repository.js';
+import { createGroupsService } from './groups/service.js';
 import { buildApp, type Runtime, type RuntimeOptions } from './runtime.js';
 import { parseEnv, type ServerEnv } from './config/env.js';
 
@@ -31,6 +33,7 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
       repo: createAuthRepository(database),
       jwtSecret: env.jwtSecret,
     }),
+    groups: createGroupsService(createGroupsRepository(database)),
   };
 }
 

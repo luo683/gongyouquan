@@ -2,6 +2,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { jwtVerify } from 'jose';
 import { Server as SocketIOServer, type Socket } from 'socket.io';
 import { registerAuthRoutes, type AuthRouteService } from './auth/routes.js';
+import { createAuthenticator } from './http/auth.js';
+import { registerGroupRoutes } from './groups/routes.js';
+import type { GroupsService } from './groups/service.js';
 import { registerHealthRoutes, type Readiness } from './health.js';
 
 export type RuntimeOptions = {
@@ -10,6 +13,7 @@ export type RuntimeOptions = {
   getReadiness: () => Promise<Readiness>;
   getGroupSyncState: (input: { groupId: string; userId: string }) => Promise<{ lastSeq: number } | null>;
   auth?: AuthRouteService;
+  groups?: GroupsService;
 };
 
 export type Runtime = {
@@ -53,6 +57,7 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
 
   await registerHealthRoutes(app, { getReadiness: options.getReadiness });
   if (options.auth) await registerAuthRoutes(app, options.auth);
+  if (options.groups) await registerGroupRoutes(app, options.groups, createAuthenticator(options.jwtSecret));
 
   io.use(async (socket, next) => {
     try {

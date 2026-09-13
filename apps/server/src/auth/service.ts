@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import argon2 from 'argon2';
 import { SignJWT } from 'jose';
+import { HttpError } from '../http/errors.js';
 
 export type AuthUser = {
   id: string;
@@ -56,11 +57,7 @@ export type AuthRepository = {
   revokeSession(session: AuthSession, now: Date): Promise<void>;
 };
 
-export class AuthError extends Error {
-  constructor(public readonly code: string) {
-    super(code);
-  }
-}
+export class AuthError extends HttpError {}
 
 type AuthServiceOptions = {
   repo: AuthRepository;
