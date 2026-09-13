@@ -1,15 +1,26 @@
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import argon2 from 'argon2';
 import { createAuthRepository } from '../../src/auth/repository.js';
 import { createAuthService } from '../../src/auth/service.js';
 import { createGroupsRepository } from '../../src/groups/repository.js';
 import { createGroupsService } from '../../src/groups/service.js';
-import { createDatabase, migrateDatabase, type Database } from '../../src/db/pool.js';
+import type { Database } from '../../src/db/pool.js';
+import { migrateDatabase } from '../../src/db/pool.js';
 import type { QueryClient } from '../../src/db/migrate.js';
-import { loadMigrations } from '../../src/db/migrations.js';
 import { runMigrations } from '../../src/db/migrate.js';
-import { HttpError } from '../../src/http/errors.js';
+import { loadMigrations } from '../../src/db/migrations.js';
+import {
+  createHarness,
+  databaseUrl,
+  expectCode,
+  num,
+  row0,
+  seedPassword,
+  sleep,
+  str,
+  type Harness,
+  type Row,
+} from './harness.js';
 
 /**
  * Real-PostgreSQL acceptance (docs/specs/01 §9.4).
@@ -18,83 +29,46 @@ import { HttpError } from '../../src/http/errors.js';
  * `pnpm test` stays green with no database around. The CI `integration` job
  * points it at a real postgres service container.
  */
-const databaseUrl = process.env.INTEGRATION_DATABASE_URL ?? '';
+/**
+ * Real-PostgreSQL acceptance (docs/specs/01 §9.4).
+ *
+ * Skipped unless INTEGRATION_DATABASE_URL is set, so plain `pnpm test` stays
+ * green with no database around; the CI `integration` job sets it. Fixtures and
+ * cleanup come from ./harness.ts, shared with messages.test.ts so the two
+ * cannot drift into different ideas of what a seeded group means.
+ */
+const harness: Harness = createHarness();
+const runTag = harness.tag;
 const jwtSecret = 'integration-secret-not-a-real-one';
-const runTag = randomBytes(4).toString('hex');
-const seedPassword = 'HardPass2026';
-
-type Row = Record<string, unknown>;
-const num = (value: unknown): number => Number(value);
-const str = (value: unknown): string => String(value);
 
 let db: Database;
 
-/** QueryClient.withSession is optional on the fake used by unit tests; here it is always real. */
-async function withSession<T>(fn: (session: QueryClient) => Promise<T>): Promise<T> {
-  if (!db.withSession) throw new Error('expected a database that can open a session');
-  return (db as Required<QueryClient>).withSession(fn);
-}
+const expectRejected = (sql: string, values: unknown[] = [], fragment = ''): Promise<void> =>
+  harness.reject(sql, values, fragment);
+const snapshotMigrations = (): Promise<Array<Record<string, string>>> => harness.migrationLedger();
+const insertUser = (username: string, displayName?: string): Promise<string> =>
+  harness.insertUser(username, displayName);
+const bootstrapUser = (): Promise<string> => harness.bootstrapUser();
+const seedGroup = (name?: string): Promise<string> => harness.seedGroup(name);
+const insertInvite = (groupId: string, code: string, maxUses: number): Promise<void> =>
+  harness.insertInvite(groupId, code, maxUses);
+const insertMessage = (
+  groupId: string,
+  senderId: string,
+  body: string | null,
+  kind?: string,
+  deleted?: boolean,
+): Promise<number> => harness.insertMessage(groupId, senderId, body, kind, deleted);
+const withSession = <T>(fn: (session: QueryClient) => Promise<T>): Promise<T> => harness.withSession(fn);
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function row0(rows: Row[]): Row {
-  const row = rows[0];
-  if (!row) throw new Error('expected at least one row');
-  return row;
-}
-
-/** Assert the service layer rejects with exactly this contract error code. */
-async function expectCode(code: string, fn: () => Promise<unknown>): Promise<void> {
-  let caught: unknown;
-  try {
-    await fn();
-  } catch (error) {
-    caught = error;
-  }
-  if (!caught) throw new Error(`expected ${code}, but nothing was thrown`);
-  expect(caught).toBeInstanceOf(HttpError);
-  expect((caught as HttpError).code).toBe(code);
-}
-
-/** Assert PostgreSQL itself rejects the statement, with a matching message fragment. */
-async function expectRejected(query: string, values: unknown[] = [], fragment = ''): Promise<void> {
-  let failed = false;
-  try {
-    await db.query(query, values);
-  } catch (error) {
-    failed = true;
-    if (fragment) expect(str((error as Error).message)).toContain(fragment);
-  }
-  expect(failed, `expected this statement to be rejected: ${query}`).toBe(true);
-}
-
-describe.runIf(databaseUrl !== '')('database integration (real PostgreSQL)', () => {
+describe.runIf(databaseUrl() !== '')('database integration (real PostgreSQL)', () => {
   beforeAll(async () => {
-    db = createDatabase(databaseUrl);
-    await migrateDatabase(db);
+    db = await harness.up();
   });
 
   afterAll(async () => {
-    if (!db) return;
-    // Every fixture username carries this run's tag, so one pattern finds them
-    // all - including the account auth.register() created on our behalf.
-    // Leave the shared database exactly as we found it so the suite can run
-    // twice in a row against a persistent instance.
-    await db.query(
-      `DELETE FROM groups WHERE created_by IN (SELECT id FROM users WHERE username LIKE $1)`,
-      [`%${runTag}%`],
-    );
-    // files.uploader_id has no ON DELETE CASCADE, so an uploader cannot be
-    // removed until their objects are gone. Real constraint, learned the hard way.
-    await db.query(
-      `DELETE FROM files WHERE uploader_id IN (SELECT id FROM users WHERE username LIKE $1)`,
-      [`%${runTag}%`],
-    );
-    // sessions / group_members / messages hang off users and groups with CASCADE.
-    await db.query(`DELETE FROM users WHERE username LIKE $1`, [`%${runTag}%`]);
-    await db.end();
+    // One shared reaper, so every real-database suite cleans up identically.
+    await harness.down();
   });
 
   describe('schema', () => {
@@ -584,64 +558,4 @@ describe.runIf(databaseUrl !== '')('database integration (real PostgreSQL)', () 
     });
   });
 
-  async function snapshotMigrations(): Promise<Array<Record<string, string>>> {
-    const result = await db.query<Row>('SELECT id, checksum, applied_at FROM schema_migrations ORDER BY id');
-    return result.rows.map((row) => ({
-      id: str(row.id),
-      checksum: str(row.checksum),
-      applied_at: str(row.applied_at),
-    }));
-  }
-
-  async function insertUser(username: string, displayName = '工友'): Promise<string> {
-    const hash = await argon2.hash(seedPassword, { type: argon2.argon2id });
-    const inserted = await db.query<Row>(
-      `INSERT INTO users (username, display_name, password_hash) VALUES ($1, $2, $3) RETURNING id`,
-      [username, displayName, hash],
-    );
-    return str(row0(inserted.rows).id);
-  }
-
-  async function bootstrapUser(): Promise<string> {
-    const username = `bootstrap-${runTag}`;
-    const existing = await db.query<Row>('SELECT id FROM users WHERE username = $1', [username]);
-    if (existing.rows[0]) return str(row0(existing.rows).id);
-    return insertUser(username, '内置号');
-  }
-
-  async function seedGroup(): Promise<string> {
-    const userId = await bootstrapUser();
-    const created = await db.query<Row>(
-      `INSERT INTO groups (name, description, created_by) VALUES ($1, 'seed', $2) RETURNING id`,
-      [`seed-${runTag}-${randomBytes(3).toString('hex')}`, userId],
-    );
-    const groupId = str(row0(created.rows).id);
-    await db.query(`INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'owner')`, [groupId, userId]);
-    return groupId;
-  }
-
-  async function insertInvite(groupId: string, code: string, maxUses: number): Promise<void> {
-    await db.query(
-      `INSERT INTO group_invites (group_id, code, role, max_uses, created_by) VALUES ($1, $2, 'member', $3, $4)`,
-      [groupId, code, maxUses, await bootstrapUser()],
-    );
-  }
-
-  async function insertMessage(
-    groupId: string,
-    senderId: string,
-    body: string | null,
-    kind = 'text',
-    deleted = false,
-  ): Promise<number> {
-    const seq = num(
-      row0((await db.query<Row>('SELECT alloc_group_seq($1) AS seq', [groupId])).rows).seq,
-    );
-    await db.query(
-      `INSERT INTO messages (group_id, seq, sender_id, kind, body, deleted_at)
-       VALUES ($1, $2, $3, $4::message_kind, $5, $6)`,
-      [groupId, seq, senderId, kind, body, deleted ? new Date() : null],
-    );
-    return seq;
-  }
 });
