@@ -46,4 +46,16 @@ describe('shared contract foundation', () => {
       }),
     ).toThrow();
   });
+
+  it('accepts every error code the server mapping can emit', () => {
+    // These two are defined in the backend spec (3.5 and 8.1) but were missing from the enum,
+    // so the server could throw codes the shared contract rejected.
+    for (const code of ['CANNOT_REVIEW_OWN_SUBMISSION', 'RATE_LIMITED']) {
+      expect(
+        errorEnvelopeSchema.parse({
+          error: { code, message: 'x', requestId: 'request-1' },
+        }).error.code,
+      ).toBe(code);
+    }
+  });
 });

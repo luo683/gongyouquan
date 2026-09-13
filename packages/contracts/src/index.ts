@@ -36,11 +36,13 @@ export const errorCodeSchema = z.enum([
   'FORBIDDEN_NOT_MEMBER',
   'FORBIDDEN_ROLE',
   'ACCOUNT_DISABLED',
+  'CANNOT_REVIEW_OWN_SUBMISSION',
   'NOT_FOUND',
   'STATE_MACHINE_VIOLATION',
   'EDIT_WINDOW_EXPIRED',
   'DELETE_WINDOW_EXPIRED',
   'GROUP_ARCHIVED',
+  'RATE_LIMITED',
 ]);
 export type ErrorCode = z.infer<typeof errorCodeSchema>;
 
