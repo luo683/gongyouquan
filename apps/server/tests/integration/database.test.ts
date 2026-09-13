@@ -35,6 +35,10 @@ async function withSession<T>(fn: (session: QueryClient) => Promise<T>): Promise
   return (db as Required<QueryClient>).withSession(fn);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function row0(rows: Row[]): Row {
   const row = rows[0];
   if (!row) throw new Error('expected at least one row');
@@ -114,7 +118,8 @@ describe.runIf(databaseUrl !== '')('database integration (real PostgreSQL)', () 
       const row = row0(shape.rows);
       expect(num(row.tables)).toBe(22);
       expect(num(row.own_funcs)).toBe(4);
-      expect(num(row.triggers)).toBe(7);
+      // 7 come from 0001_init.sql; 0002_messages_updated_at.sql adds the 8th.
+      expect(num(row.triggers)).toBe(8);
       expect(num(row.enums)).toBe(11);
       expect(num(row.ext_needed)).toBe(2);
       // 41 hand-written indexes plus one backing index per PK / unique constraint.
@@ -156,7 +161,7 @@ describe.runIf(databaseUrl !== '')('database integration (real PostgreSQL)', () 
   describe('migration runner', () => {
     it('re-running the migration is a no-op (spec 01 §9.4)', async () => {
       const first = await snapshotMigrations();
-      expect(first.length).toBeGreaterThan(0);
+      expect(first.map((m) => m.id)).toEqual(['0001_init.sql', '0002_messages_updated_at.sql']);
 
       await migrateDatabase(db);
 
@@ -171,7 +176,11 @@ describe.runIf(databaseUrl !== '')('database integration (real PostgreSQL)', () 
 
       await expect(runMigrations(db, [{ ...first, checksum: flipped }])).rejects.toThrow(/checksum mismatch/);
       // The real ledger is untouched by the rejected attempt.
-      expect(await snapshotMigrations()).toEqual(await snapshotMigrations());
+      const ledger = await snapshotMigrations();
+      const onDisk = await loadMigrations();
+      expect(ledger.map((m) => [m.id, m.checksum])).toEqual(
+        onDisk.map((m) => [m.id, m.checksum]),
+      );
     });
   });
 
@@ -426,6 +435,46 @@ describe.runIf(databaseUrl !== '')('database integration (real PostgreSQL)', () 
       expect(rolledBack).toBe(before + 1);
       const next = await db.query<Row>('SELECT alloc_group_seq($1) AS seq', [groupId]);
       expect(num(row0(next.rows).seq)).toBe(rolledBack);
+    });
+
+    it('advances messages.updated_at on edit and on revoke (spec 4.3.4)', async () => {
+      // This is the whole reason migration 0002 exists: without a monotonic
+      // per-row stamp a client cannot decide which of two out-of-order
+      // message:updated / message:deleted events should win.
+      const groupId = await seedGroup();
+      const userId = await bootstrapUser();
+      const seq = await insertMessage(groupId, userId, '原始内容');
+
+      const stamp = async (): Promise<Row> => {
+        const found = await db.query<Row>(
+          `SELECT updated_at::text AS updated_at, edited_at, deleted_at
+             FROM messages WHERE group_id = $1 AND seq = $2`,
+          [groupId, seq],
+        );
+        return row0(found.rows);
+      };
+
+      const atFirst = await stamp();
+      expect(atFirst.updated_at).toBeTruthy();
+      expect(atFirst.edited_at).toBeNull();
+
+      await sleep(20);
+      await db.query(
+        `UPDATE messages SET body = '改过的内容', edited_at = now() WHERE group_id = $1 AND seq = $2`,
+        [groupId, seq],
+      );
+      const atEdit = await stamp();
+      expect(new Date(str(atEdit.updated_at)).getTime()).toBeGreaterThan(new Date(str(atFirst.updated_at)).getTime());
+      expect(atEdit.edited_at).not.toBeNull();
+
+      await sleep(20);
+      await db.query(
+        `UPDATE messages SET deleted_at = now(), deleted_by = $2 WHERE group_id = $1 AND seq = $3`,
+        [groupId, userId, seq],
+      );
+      const atRevoke = await stamp();
+      expect(new Date(str(atRevoke.updated_at)).getTime()).toBeGreaterThan(new Date(str(atEdit.updated_at)).getTime());
+      expect(atRevoke.deleted_at).not.toBeNull();
     });
 
     it('keeps task_no and group seq as independent counters', async () => {
