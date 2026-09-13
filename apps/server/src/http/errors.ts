@@ -40,6 +40,21 @@ export function statusForErrorCode(code: string): number {
   return STATUS_BY_CODE[code] ?? 500;
 }
 
+/**
+ * A refused request that knows when it may try again.
+ *
+ * `Retry-After` is part of the contract (spec 8.1 says the 429 response
+ * carries it), so the number has to ride on the error itself rather than be
+ * re-derived by whichever layer happens to write the response - the socket
+ * path has no headers to set and still has to tell the client how long.
+ */
+export class RateLimitedError extends HttpError {
+  constructor(public readonly retryAfterSeconds: number, scope?: string) {
+    super('RATE_LIMITED', { retryAfterSeconds, ...(scope ? { scope } : {}) });
+    this.name = 'RateLimitedError';
+  }
+}
+
 export function errorEnvelope(request: { id: string }, code: string, details?: unknown) {
   return {
     error: {
@@ -63,6 +78,9 @@ export async function guarded<T>(
     const code = error instanceof HttpError ? error.code : 'INTERNAL_ERROR';
     if (!(error instanceof HttpError)) console.error('unhandled request error', error);
     const details = error instanceof HttpError ? error.details : undefined;
+    if (error instanceof RateLimitedError) {
+      reply.header('retry-after', String(error.retryAfterSeconds));
+    }
     await reply
       .status(statusForErrorCode(code))
       .send(errorEnvelope(request, code, details));
