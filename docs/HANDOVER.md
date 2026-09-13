@@ -88,21 +88,23 @@ c88068c fix(contracts): add error codes the server mapping can emit
 | PostgreSQL 连接池 + advisory lock 幂等迁移 + checksum 防篡改 | `src/db/` |
 | Bearer 鉴权（过期 `TOKEN_EXPIRED`、无效 `UNAUTHENTICATED`，不查库） | `src/http/auth.ts` |
 | 统一错误封装与 code→HTTP 映射 | `src/http/errors.ts` |
+| 错误可携带机器可读的 `details`（`HttpError(code, details)` → `errorEnvelope`） | `src/http/errors.ts` |
 | **auth**：邀请码注册（同事务消耗次数）、Argon2id、登录、refresh 轮换、旧 token 重用→整族撤销、logout | `src/auth/` |
 | **groups**：建群（创建者 owner）、群列表、详情（含 `myMembership`）、成员列表、改群信息 | `src/groups/` |
+| **messages** 写入路径：`alloc_group_seq` 同事务发号、`(sender_id, client_msg_id)` 幂等重发、历史分页、15 分钟编辑窗与 2 分钟撤回窗（按 3.4 两行分开）、撤回留痕与 `/raw` 分级、每次变更同事务写 outbox | `src/messages/` |
 
 ### 测试
 
 ```text
 packages/contracts   4 文件 / 29 用例
-apps/server         11 文件 / 56 用例（其中 19 个需要真实数据库）
-合计                15 文件 / 85 用例，全绿
+apps/server         12 文件 / 67 用例（其中 30 个需要真实数据库）
+合计                16 文件 / 96 用例，全绿
 ```
 
 ### 真实数据库闸门
 
 `apps/server/tests/integration/database.test.ts` 是仓库里唯一会连真库的测试。
-由 `INTEGRATION_DATABASE_URL` 控制：不设这个变量时那 19 个用例整体 skip，
+由 `INTEGRATION_DATABASE_URL` 控制：不设这个变量时那 30 个用例整体 skip，
 所以 `pnpm test` 在没有任何数据库的机器上依然全绿。跑它：
 
 ```bash
@@ -120,7 +122,7 @@ PowerShell 用 `$env:INTEGRATION_DATABASE_URL="..."` 单独一行。用例跑完
 1. ~~真实 PostgreSQL 验证~~ **已完成**（2026-09-13）—— 建库、迁移幂等、checksum 防篡改、auth/groups 的 SQL 都已在 PG 17.11 上跑过，并固化成测试。数据库这边只剩说明书 1685 行要求的 `EXPLAIN (ANALYZE, BUFFERS)` + 几千行样例数据。
 2. **成员管理与邀请码接口** —— 踢人 / 加人（复活）/ 改角色 / 转让群主 / 邀请码增删查。
 3. **限流**（login 双维度、register、refresh 全缺）、`logout-all`、refresh Cookie 清除响应。
-4. **messages / sync / tasks / files / search / ops** —— 说明书第 4 节说消息同步占 70% 复杂度。线格式已在 `packages/contracts` 落地、由 17 个用例钉住；服务端实现（复用 `alloc_group_seq`、幂等收口、`sync:pull` + `asOfSeq`、socket 广播、编辑与撤回窗口）仍然一行没写。`tasks` / `files` / `search` / `ops` 未开始。
+4. **messages（部分完成）/ sync / read 位点 / tasks / files / search / ops** —— 发送、编辑、撤回、历史分页已在真库上验证；`sync:pull` + `asOfSeq`、`read:update` 位点与已读回执、以及 socket 实时投递还没有。`tasks` / `files` / `search` / `ops` 未开始。
 5. **浏览器端（React）、Electron 外壳**。
 6. **部署与运维** —— Docker Compose、Caddyfile、备份、systemd、opsctl 全部未开始。
 7. **`lint` 是空转** —— 根有 `lint` script，两个子包都没定义，`--if-present` 直接跳过。CI 里的 "lint" 步骤没有任何实际作用。
@@ -138,7 +140,7 @@ pnpm --filter @gongyouquan/server test        # 只跑服务端
 pnpm --filter @gongyouquan/contracts test     # 只跑契约
 ```
 
-真实数据库闸门（不设 `INTEGRATION_DATABASE_URL` 时那 19 个用例整体 skip）：
+真实数据库闸门（不设 `INTEGRATION_DATABASE_URL` 时那 30 个用例整体 skip）：
 
 ```bash
 docker compose -f infra/db/docker-compose.yml up -d      # postgres:17-alpine，宿主端口 55432
@@ -228,3 +230,7 @@ pnpm --filter @gongyouquan/server dev
 4. `errorEnvelope` 的 `message` 是英文、给日志看；中文文案由前端按 `code` 映射。
 5. 迁移文件**只增不改**：已发布的迁移改了 checksum 会导致启动直接失败（这是故意的保护）。加了新迁移就顺手改 `apps/server/tests/db.test.ts` 里那份迁移清单断言，否则静态检查与真库会各说一套。
 6. 不要为了「跑起来方便」在 `main.ts` 里塞假的 readiness provider —— `apps/server` 的设计是数据库不可用就不能就绪。
+
+7. **撤回是两行规则，不是一行**：`撤回自己的消息（2 分钟内）` 对 owner/admin/member 都是 ✓，`撤回他人的消息` 只有 owner/admin ✓。写成「管理员免窗口」就等于群主能撤自己三天前的话。见 `docs/decisions/0006` 末节。
+8. `outbox.aggregate_id` **没有也不可能有外键**（它是多态的）。消息被删掉后事件会留下来，而 `readyz` 的 lag 取的是「最老的未处理事件」——一条孤儿就能把 lag 永久钉住。worker 必须让每个事件都到终态，见 `docs/decisions/0006` 缺口六。
+9. 编辑要同时写 `edited_at`。只改 `body` 的话 `updated_at` 会被触发器推进，测试照样绿，但 `editedAt` 永远是 null，前端显示不出「已编辑」。

@@ -58,3 +58,28 @@ DDL 里 `client_msg_id UUID`，第 5.4 行末把「重试必须复用同一个 `
 `message_attachments` 需要 `files` 模块（上传、`sha256` 去重、`ref_count` 回收），`kind='task_card'` 需要 `tasks` 模块，`refMessageId` 需要写入 `message_refs` 但说明书没给这张表的写入时机与级联语义。三者都在本轮范围之外。
 
 **当前决定**：`messages` 服务先只接受 `kind in ('text','system')` 且 `system` 只允许服务端自己产生；`attachments` / `mentions` / `refMessageId` 在 DTO 里保留字段与默认值，但写入路径暂不放行。放开时各自另立决定，不在这里预埋。
+
+## 缺口六：`outbox.aggregate_id` 没有外键，孤儿事件会把就绪度永久钉住
+
+`outbox` 只有一个主键约束，`aggregate_id` 上没有外键——这是对的，它本来就是多态的（message / task / comment 共用一张表），加不了外键。
+
+但 6.9 只写了「已处理的记录保留 7 天后删除」，没有写**从未被处理、而聚合根已经消失**的行怎么办。这类行的 `processed_at` 永远是 NULL，而 `readyz` 的 lag 恰好取的就是 `MIN(created_at) WHERE processed_at IS NULL`。一条孤儿就能把 lag 钉在一个只会增长的数值上，永远降不下来。
+
+真库上已经复现：集成测试跑完把自己造的消息删掉之后，`outbox` 留下 71 行没人认领的事件。
+
+**当前决定**：worker 必须让每个事件都到达终态——聚合根不存在时也要置 `processed_at`（或走 `attempts++` 到上限后落 `last_error` 由清理任务收走），不能指望聚合根还在。同时清理任务的条件写成「按 `processed_at` 龄期」而不是「按聚合根是否存在」。本轮先把这条记下来，测试夹具按孤儿条件清理，实现 worker 时必须有对应的用例。
+
+## 实现陷阱（不是矛盾，但极易写错）
+
+撤回在 3.4 矩阵里是**两行**：
+
+| 操作 | owner | admin | member |
+|---|---|---|---|
+| 撤回自己的消息（2 分钟内） | ✓ | ✓ | ✓ |
+| 撤回他人的消息 | ✓ | ✓ | ✗ |
+
+写成「moderator 就免窗口」是错的——那等于群主可以随时撤回自己三天前发的话，而普通成员两分钟后就再也撤不了。正确形式是两个分支的或：自己的消息一律受 2 分钟约束，他人消息只有管理员能碰且不受时间约束。
+
+实现里已按此写成单条 `UPDATE` 的 WHERE，见 `apps/server/src/messages/repository.ts` 的 `applyRevoke`，并由集成用例 `(real PostgreSQL) applies the 2 minute window to your own message and exempts moderators only for others` 钉住。
+
+同理，编辑必须同时置 `edited_at`：只改 `body` 的话，DTO 上 `editedAt` 永远是 null，前端无从显示「已编辑」。0002 加的 `updated_at` 由触发器负责，两者不是一回事——`edited_at` 是给用户看的语义时间，`updated_at` 是给客户端做覆盖判定的机制时间。
