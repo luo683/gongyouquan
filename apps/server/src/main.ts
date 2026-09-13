@@ -6,6 +6,8 @@ import { createGroupsRepository } from './groups/repository.js';
 import { createGroupsService } from './groups/service.js';
 import { createMessagesRepository } from './messages/repository.js';
 import { createMessagesService } from './messages/service.js';
+import { createMembersRepository } from './groups/members.js';
+import { createMembersService } from './groups/members-service.js';
 import { createMessageBus } from './messages/bus.js';
 import { createSyncRepository } from './sync/repository.js';
 import { createSyncService } from './sync/service.js';
@@ -56,6 +58,7 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
       limiter,
     }),
     groups: createGroupsService(groupsRepo, { limiter }),
+    members: createMembersService(createMembersRepository(database), groupsRepo),
     // One shared bus: the write path publishes here after COMMIT and buildApp
     // attaches the Socket.IO emitter to it, so nothing in src/messages needs to
     // know what a room is.

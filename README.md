@@ -17,7 +17,9 @@
 - 浏览器端 `apps/web`（React + Vite + TS）：登录/邀请注册、群列表与未读、实时收发、撤回，所有响应都过 `packages/contracts` 的同一套 Zod schema；4.3.4 客户端状态机有 9 个纯逻辑用例
 - 本地起法：`docker compose -f infra/db/docker-compose.yml up -d` → `pnpm --filter @gongyouquan/server dev` → `pnpm --filter @gongyouquan/web dev`（Vite 代理 `/api` 与 `/socket.io`）
 - 已落地限流：login 双维度、register、refresh 会话族、发消息双维度、写接口兜底（429 带 `Retry-After`），取舍见 `docs/decisions/0007`
-- 尚未接入：成员管理写接口、邀请码管理（因此界面里加入第二个群的入口是关着的）、已读回执、tasks/files/search/ops、Electron、一键全栈部署
+- 已落地：成员管理与邀请码（加人 / 踢人 / 退出 / 改角色 / 转让群主 + 邀请码增删查），按说明书 3.4 逐格有真库用例
+- 一键全栈：`docker compose -f infra/deploy/docker-compose.yml up -d`，再 `docker compose run --rm server node --import tsx src/cli/create-admin.ts` 建首个账号
+- 尚未接入：已读回执、typing/presence/mention 事件、tasks/files/search/ops、Electron、备份与恢复演练
 - 真实 PostgreSQL 验证**已完成**（PG 17.11）：建库、迁移连跑两次为 no-op、checksum 防篡改、auth/groups 的 SQL 真跑，
   固化为 `apps/server/tests/integration/` 与 `tests/e2e/`（47 个用例，分布在 3 个文件；由 `INTEGRATION_DATABASE_URL` 开关，不设则整体 skip）
 - 本地起库：`docker compose -f infra/db/docker-compose.yml up -d`（宿主端口 55432；镜像走 daocloud 源，Docker Hub 在本机不可达）

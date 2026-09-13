@@ -171,6 +171,38 @@ export function App() {
     });
   }
 
+  /**
+   * Creating a group is the one write the sidebar can offer without guessing at
+   * an endpoint: POST /groups exists and makes the caller its owner.
+   */
+  async function createGroup(): Promise<void> {
+    const name = globalThis.window.prompt('群名称', `夜班组-${new Date().toISOString().slice(5, 10)}`);
+    if (!name || !name.trim()) return;
+    try {
+      const created = await api.createGroup({ name: name.trim() });
+      setNotice('');
+      await refreshGroups();
+      setSelected(created.id);
+    } catch (error) {
+      setNotice(error instanceof ApiError ? error.message : '建群失败');
+    }
+  }
+
+  /**
+   * Codes are minted here and shown once, because the list endpoint stops
+   * returning them after creation - so a leaked roster read is not a leaked
+   * join link, and there is no way to recover one from the UI.
+   */
+  async function mintInvite(): Promise<void> {
+    if (!selected) return;
+    try {
+      const invite = await api.createInvite(selected, { role: 'member', maxUses: 10 });
+      setNotice(`邀请码 ${invite.code}（可用 10 次，只显示这一次）`);
+    } catch (error) {
+      setNotice(error instanceof ApiError ? error.message : '生成邀请码失败');
+    }
+  }
+
   async function revoke(message: MessageDto): Promise<void> {
     const socket = socketRef.current;
     if (!socket) return;
@@ -246,6 +278,23 @@ export function App() {
         <button type="button" className="link" onClick={() => void refreshGroups()}>
           刷新群列表
         </button>
+        <button
+          type="button"
+          className="link"
+          onClick={() => {
+            void createGroup();
+          }}
+        >
+          新建群
+        </button>
+        {/*
+          There is deliberately no "paste an invite code" box for a signed-in
+          user. Spec 3.1 line 209 makes an invite code something registration
+          consumes, and no endpoint lets an existing account redeem one - so a
+          field here would accept the code, call something, and fail. Joining a
+          second group therefore means registering, or being added by an owner or
+          admin, which is what 新建群 plus the roster is for.
+        */}
         <ul>
           {groupList.map((group) => (
             <li key={group.id}>
@@ -272,6 +321,11 @@ export function App() {
               <span className="sub">
                 {current.summary ? `${current.summary.memberCount} 人` : ''} · 已同步到 seq {current.state.syncedSeq}
               </span>
+              {/* Only owners and admins can mint one; the server answers 403 otherwise,
+                  and the client does not pretend to know the role better than it does. */}
+              <button type="button" className="link" onClick={() => void mintInvite()}>
+                生成邀请码
+              </button>
             </header>
             <ol className="stream">
               {current.messages.map((message) => (

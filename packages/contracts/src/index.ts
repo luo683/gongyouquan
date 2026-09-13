@@ -357,3 +357,58 @@ export const wsErrorPayloadSchema = z.object({
   }),
 });
 export type WsErrorPayload = z.infer<typeof wsErrorPayloadSchema>;
+
+// ============================================================
+// 成员管理与邀请码 —— 说明书 5.3、3.4 权限矩阵
+// ============================================================
+
+/** POST /groups/:gid/invites —— role 默认 member，expiresInHours 省略即长期有效。 */
+export const inviteCreateSchema = z.object({
+  role: groupRoleSchema.optional(),
+  maxUses: z.number().int().min(1).max(1000).optional(),
+  expiresInHours: z.number().int().min(1).max(24 * 30).optional(),
+});
+export type InviteCreate = z.infer<typeof inviteCreateSchema>;
+
+/** 刚创建出来的邀请码：code 只在这里出现，列表里不再回显。 */
+export const inviteCreatedDtoSchema = z.object({
+  id: entityIdSchema,
+  code: z.string().min(1),
+  expiresAt: apiTimestampSchema.nullable(),
+});
+export type InviteCreatedDto = z.infer<typeof inviteCreatedDtoSchema>;
+
+/** GET /groups/:gid/invites —— 不含 code 本身，含 usedCount 与撤销态。 */
+export const inviteDtoSchema = z.object({
+  id: entityIdSchema,
+  role: groupRoleSchema,
+  maxUses: z.number().int().positive().nullable(),
+  usedCount: z.number().int().nonnegative(),
+  createdBy: entityIdSchema,
+  expiresAt: apiTimestampSchema.nullable(),
+  revokedAt: apiTimestampSchema.nullable(),
+  createdAt: apiTimestampSchema,
+});
+export type InviteDto = z.infer<typeof inviteDtoSchema>;
+
+/** POST /groups/:gid/members —— 只加已经是系统用户的人。 */
+export const memberAddSchema = z.object({
+  userId: entityIdSchema,
+  role: z.enum(['admin', 'member']).default('member'),
+});
+export type MemberAdd = z.infer<typeof memberAddSchema>;
+
+/**
+ * PATCH /groups/:gid/members/:uid 是两种操作共用一个端点，且互斥：
+ * 改角色只有 owner 能做，转让群主也是。校验放在服务端而不是 Zod，
+ * 因为「两个都给了」和「两个都没给」的错误语义不同（INVALID_ARGUMENT）。
+ */
+export const memberUpdateSchema = z
+  .object({
+    role: z.enum(['admin', 'member']).optional(),
+    transferOwnership: z.boolean().optional(),
+  })
+  .refine((value) => value.role !== undefined || value.transferOwnership === true, {
+    message: 'role 或 transferOwnership 至少要给一个',
+  });
+export type MemberUpdate = z.infer<typeof memberUpdateSchema>;

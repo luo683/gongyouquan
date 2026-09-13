@@ -8,6 +8,8 @@ import { createGroupsService } from '../../src/groups/service.js';
 import { createMessageBus } from '../../src/messages/bus.js';
 import { createMessagesRepository } from '../../src/messages/repository.js';
 import { createMessagesService } from '../../src/messages/service.js';
+import { createMembersRepository } from '../../src/groups/members.js';
+import { createMembersService } from '../../src/groups/members-service.js';
 import { createSyncRepository } from '../../src/sync/repository.js';
 import { createSyncService } from '../../src/sync/service.js';
 import { buildApp, type Runtime } from '../../src/runtime.js';
@@ -98,6 +100,9 @@ describe.runIf(url !== '')('group chat end to end', () => {
       auth,
       groups: createGroupsService(groupsRepo),
       messages: createMessagesService(messagesRepo, groupsRepo, { publish: bus.publish }),
+      // Without this the invite endpoint answers 404, which is exactly what the
+      // scenario hit when it started minting a code instead of inserting one.
+      members: createMembersService(createMembersRepository(database), groupsRepo),
       sync: createSyncService({ repo: createSyncRepository(database, messagesRepo), contractVersion: 'e2e-1' }),
       bus,
     });
@@ -108,10 +113,10 @@ describe.runIf(url !== '')('group chat end to end', () => {
     if (!address || typeof address === 'string') throw new Error('server did not bind');
     origin = `http://127.0.0.1:${address.port}`;
 
-    // An invite always needs a group that already exists, and a group needs a
-    // member to create it, so the bootstrap account has to exist before any of
-    // this can go through the real endpoints.
-    const inviteTo = async (targetGroup: string, creator: string, label: string): Promise<string> => {
+    // An invite needs a group that already exists and a member to issue it, so
+    // the very first code has to be laid down outside the API - that is what the
+    // create-admin CLI exists for. Everything after it goes through endpoints.
+    const seedInvite = async (targetGroup: string, creator: string, label: string): Promise<string> => {
       const code = `E2E-${label}-${randomBytes(3).toString('hex').toUpperCase()}`;
       await db.query(
         `INSERT INTO group_invites (group_id, code, role, max_uses, created_by)
@@ -121,8 +126,26 @@ describe.runIf(url !== '')('group chat end to end', () => {
       return code;
     };
 
+    /**
+     * POST /groups/:gid/invites, as a real client would. The scenario's "生成邀请码"
+     * step used to be this file writing an INSERT, which proved the registration path
+     * but not that anyone could actually hand out a code.
+     */
+    const mintInvite = async (token: string, targetGroup: string): Promise<string> => {
+      const created = await runtime.app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${targetGroup}/invites`,
+        headers: { authorization: `Bearer ${token}` },
+        payload: { role: 'member', maxUses: 1 },
+      });
+      expect(created.statusCode).toBe(201);
+      const body = created.json() as { code: string };
+      expect(body.code).toMatch(/^GYQ-[0-9A-F]{12}$/);
+      return body.code;
+    };
+
     // Alice joins the bootstrap group, which is only ever her foothold.
-    alice = await register(`alice-${tag}`, await inviteTo(seedGroupId, seedId, 'A'));
+    alice = await register(`alice-${tag}`, await seedInvite(seedGroupId, seedId, 'A'));
 
     // Alice creates the group the whole scenario happens in.
     const created = await runtime.app.inject({
@@ -140,12 +163,13 @@ describe.runIf(url !== '')('group chat end to end', () => {
     // consume the invite - which is what this did first - leaves "bob" outside the
     // group and every socket assertion silently waiting for an event that can
     // never arrive.
-    bob = await register(`bob-${tag}`, await inviteTo(groupId, alice.user.id, 'B'));
+    // Bob's code is minted by the API, by Alice, in the group the scenario runs in.
+    bob = await register(`bob-${tag}`, await mintInvite(alice.accessToken, groupId));
     expect(bob.user.id).not.toBe(alice.user.id);
 
     // Carol only ever joins the bootstrap group, so Alice's group is a stranger to
     // her and she is a stranger to it.
-    carol = await register(`carol-${tag}`, await inviteTo(seedGroupId, seedId, 'C'));
+    carol = await register(`carol-${tag}`, await seedInvite(seedGroupId, seedId, 'C'));
 
     // Membership proved through the API rather than assumed from the invite.
     const members = await runtime.app.inject({
@@ -214,6 +238,7 @@ describe.runIf(url !== '')('group chat end to end', () => {
     const bobSocket = await connect(bob);
 
     const delivered = once<MessageDto>(bobSocket, 'message:new');
+    const sentAt = Date.now();
 
     const sent = await ask<{ message: MessageDto }>(aliceSocket, 'message:send', {
       groupId,
@@ -222,7 +247,11 @@ describe.runIf(url !== '')('group chat end to end', () => {
       body: '十一点到',
     });
 
+    const arrivedAt = Date.now();
     const received = await delivered;
+    // once() races nothing: the emit above already completed, so this gap is the
+    // delivery latency the client experiences, not a round trip being double counted.
+    expect(arrivedAt - sentAt).toBeLessThan(1000);
     expect(received.id).toBe(sent.message.id);
     expect(received.body).toBe('十一点到');
     expect(received.seq).toBe(1);

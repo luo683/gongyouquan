@@ -15,6 +15,8 @@ import { createAuthenticator } from './http/auth.js';
 import { HttpError } from './http/errors.js';
 import { registerGroupRoutes } from './groups/routes.js';
 import { registerMessageRoutes } from './messages/routes.js';
+import { registerMemberRoutes } from './groups/member-routes.js';
+import type { MembersService } from './groups/members-service.js';
 import type { MessageBus } from './messages/bus.js';
 import type { GroupsService } from './groups/service.js';
 import type { MessagesService } from './messages/service.js';
@@ -33,6 +35,8 @@ export type RuntimeOptions = {
   groups?: GroupsService;
   messages?: MessagesService;
   /** Real watermarks and replay. When absent, hello falls back to getGroupSyncState. */
+  /** Member management and invite codes; every rule traces to spec 3.4. */
+  members?: MembersService;
   sync?: SyncService;
   /** Where committed writes go; attached to the rooms below. */
   bus?: MessageBus;
@@ -88,6 +92,7 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
   if (options.groups) await registerGroupRoutes(app, options.groups, createAuthenticator(options.jwtSecret));
   if (options.messages) await registerMessageRoutes(app, options.messages, createAuthenticator(options.jwtSecret));
   if (options.sync) await registerSyncRoutes(app, options.sync, createAuthenticator(options.jwtSecret));
+  if (options.members) await registerMemberRoutes(app, options.members, createAuthenticator(options.jwtSecret));
 
   io.use(async (socket, next) => {
     try {

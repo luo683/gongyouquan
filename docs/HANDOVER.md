@@ -92,6 +92,8 @@ c88068c fix(contracts): add error codes the server mapping can emit
 | 错误可携带机器可读的 `details`（`HttpError(code, details)` → `errorEnvelope`） | `src/http/errors.ts` |
 | **auth**：邀请码注册（同事务消耗次数）、Argon2id、登录、refresh 轮换、旧 token 重用→整族撤销、logout | `src/auth/` |
 | **groups**：建群（创建者 owner）、群列表、详情（含 `myMembership`）、成员列表、改群信息 | `src/groups/` |
+| **成员管理与邀请码**：加人（被移除者复活原行）、踢人 / 退出（owner 须先转让）、改角色、转让群主（同一事务两行一起动）、邀请码增/查/撤销 | `src/groups/members*.ts` |
+| 邀请码的 code **只在创建响应里出现一次**，列表接口不回显，所以读一次成员表不会泄露可用入群链接 | `src/groups/members.ts` |
 | **首个账号引导**：`docker compose run --rm server node --import tsx src/cli/create-admin.ts` —— 一次性建 用户 + 系统群 + 邀请码并打印，登录自校验；重复运行会拒绝。不在启动时自动执行（理由见说明书 §11 与文件头注释） | `src/cli/create-admin.ts` |
 | **一键全栈**：`docker compose -f infra/deploy/docker-compose.yml up -d` —— Postgres + API + Caddy（静态托管与 `/api`、`/socket.io` 反代），三条健康检查串成启动顺序 | `infra/deploy/` |
 | **messages** 写入路径：`alloc_group_seq` 同事务发号、`(sender_id, client_msg_id)` 幂等重发、历史分页、15 分钟编辑窗与 2 分钟撤回窗（按 3.4 两行分开）、撤回留痕与 `/raw` 分级、每次变更同事务写 outbox | `src/messages/` |
@@ -517,15 +519,15 @@ s
 
 ```text
 packages/contracts   4 文件 / 29 用例
-apps/server         16 文件 / 97 用例（其中 47 个需要真实数据库）
+apps/server         17 文件 / 107 用例（其中 57 个需要真实数据库）
 apps/web             1 文件 /  9 用例（4.3.4 客户端状态机，纯逻辑无需浏览器）
-合计                21 文件 / 135 用例，全绿
+合计                22 文件 / 145 用例，全绿
 ```
 
 ### 真实数据库闸门
 
 `apps/server/tests/integration/database.test.ts` 是仓库里唯一会连真库的测试。
-由 `INTEGRATION_DATABASE_URL` 控制：不设这个变量时那 47 个用例整体 skip（server 包内），
+由 `INTEGRATION_DATABASE_URL` 控制：不设这个变量时那 57 个用例整体 skip（server 包内），
 所以 `pnpm test` 在没有任何数据库的机器上依然全绿。跑它：
 
 ```bash
@@ -541,10 +543,10 @@ PowerShell 用 `$env:INTEGRATION_DATABASE_URL="..."` 单独一行。用例跑完
 ## 5. 还没做到的（按重要性）
 
 1. ~~真实 PostgreSQL 验证~~ **已完成**（2026-09-13）—— 建库、迁移幂等、checksum 防篡改、auth/groups 的 SQL 都已在 PG 17.11 上跑过，并固化成测试。数据库这边只剩说明书 1685 行要求的 `EXPLAIN (ANALYZE, BUFFERS)` + 几千行样例数据。
-2. **成员管理与邀请码接口** —— 踢人 / 加人（复活）/ 改角色 / 转让群主 / 邀请码增删查。
+2. ~~成员管理与邀请码接口~~ **已落地**：加人（含复活）、踢人、退出、改角色、转让群主、邀请码增/查/撤销，10 个真库用例按 3.4 逐格钉。仍缺：离职转交的批量入口、`notification_prefs`、以及成员列表的 `includeRemoved` 查询参数。
 3. ~~限流~~ **已落地**：login 双维度、register、refresh 会话族、发消息双维度、写接口兜底，429 带 `Retry-After`；`logout-all` 已实现。取舍见 `docs/decisions/0007`。仍缺：`/hooks/*` 的幂等与聚合（属于 `ops` 模块）、改密接口（`logout-all` 目前只能由前端显式调用）。
 4. **messages / sync 已打通（服务端 + 客户端）；仍缺**：已读回执 `GET /messages/:mid/receipts`（4.4.3 的 detail 分级）、`typing:*` 与 `presence:updated`、`mention:new`、编辑/撤回窗口过期的 socket 侧对 `read:updated` 的推送、`/messages/:mid/raw` 的 HTTP 路由（service 已有）。之后是 `tasks` / `files` / `search` / `ops`。
-5. **浏览器端已可用**（React + Vite，真库+真 socket 手工验证过一轮）。仍缺：Electron 外壳（`apps/desktop`）、改密与登出全部设备入口、已读回执展示、归档群入口、第二个群的加入入口——后者卡在服务端还没有邀请管理接口，客户端**故意不伪造**邀请码，见 `apps/web/src/api.ts` 顶部注释。
+5. **浏览器端已可用**（React + Vite，真库 + 真 socket 手工验证过一轮，且已有 新建群 / 生成邀请码 入口）。仍缺：Electron 外壳（`apps/desktop`）、改密入口、已读回执展示、归档群入口、以及成员管理界面（服务端接口齐了，界面还没做）。**注意**：界面里仍然没有「已登录用户凭邀请码入群」，那不是漏的——说明书 3.1 第 209 行把邀请码定义成**注册时**消耗的东西，没有任何接口让已有账号兑换它，加个输入框只会必然报错。
 6. **部署：本地全栈已可一键起**（`infra/deploy/docker-compose.yml`：Postgres + API + Caddy 静态托管与反代，含三条健康检查与 `create-admin` 引导）。**仍缺**：备份与恢复演练（说明书 §9 要求）、systemd 单元、`opsctl`、`/internal/metrics`、告警接入、以及生产版的 secret 注入——compose 里的口令是开发值，不能带上公网。
 7. **`CONTRACT_VERSION` 目前是注入的常量**，不是说明书 §7 第 4 条要求的「contracts 包 hash 前 8 位」。构建期没有计算步骤，`create-admin` 与 compose 只是把环境变量透传下去。
 7. **`lint` 是空转** —— 根有 `lint` script，两个子包都没定义，`--if-present` 直接跳过。CI 里的 "lint" 步骤没有任何实际作用。
@@ -562,7 +564,7 @@ pnpm --filter @gongyouquan/server test        # 只跑服务端
 pnpm --filter @gongyouquan/contracts test     # 只跑契约
 ```
 
-真实数据库闸门（不设 `INTEGRATION_DATABASE_URL` 时那 47 个用例整体 skip）：
+真实数据库闸门（不设 `INTEGRATION_DATABASE_URL` 时那 57 个用例整体 skip）：
 
 ```bash
 docker compose -f infra/db/docker-compose.yml up -d      # postgres:17-alpine，宿主端口 55432

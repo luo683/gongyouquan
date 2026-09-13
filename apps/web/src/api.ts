@@ -4,6 +4,7 @@ import {
   groupSummaryDtoSchema,
   messageDtoSchema,
   messageSendResultSchema,
+  inviteCreatedDtoSchema,
   type GroupDto,
   type GroupSummaryDto,
   type MessageDto,
@@ -19,6 +20,7 @@ import { copyFor } from './copy.js';
  */
 
 type Page = { items: unknown[]; nextCursor: string | null; hasMore: boolean };
+type InviteCreated = { id: string; code: string; expiresAt: string | null };
 type RegisterResult = { user: { id: string }; groups: Array<{ id: string }> };
 
 const BASE = '/api/v1';
@@ -88,11 +90,10 @@ async function call<T>(
 }
 
 /**
- * There is deliberately no createInvite() here. The server has no invite
- * management endpoint yet (docs/HANDOVER lists it as outstanding), and a client
- * that fabricated a code locally would appear to work right up until the invitee
- * could not actually use it. Joining a second group is blocked in the UI until
- * that route exists.
+ * Joining a second group is still not offered in the UI, and for the original
+ * reason: spec 3.1 line 209 makes an invite code something *registration*
+ * consumes, and no endpoint lets an already-signed-in account redeem one.
+ * createInvite() below mints codes for new people; it is not a join button.
  */
 export const api = {
   register: (input: { code: string; username: string; displayName: string; password: string }) =>
@@ -132,7 +133,22 @@ export const api = {
     });
   },
 
-  history: async (groupId: string, beforeSeq?: string): Promise<{ items: MessageDto[]; nextCursor: string | null; hasMore: boolean }> => {    const query = new URLSearchParams({ limit: '50' });
+  /** POST /groups/:gid/invites - the code comes back once and is not listed again. */
+  createInvite: (
+    groupId: string,
+    input: { role?: 'owner' | 'admin' | 'member'; maxUses?: number; expiresInHours?: number },
+  ) =>
+    call<InviteCreated>(`/groups/${groupId}/invites`, {
+      method: 'POST',
+      body: input,
+      schema: inviteCreatedDtoSchema,
+    }),
+
+  history: async (
+    groupId: string,
+    beforeSeq?: string,
+  ): Promise<{ items: MessageDto[]; nextCursor: string | null; hasMore: boolean }> => {
+    const query = new URLSearchParams({ limit: '50' });
     if (beforeSeq) query.set('beforeSeq', beforeSeq);
     const page = await call<{ items: unknown[]; nextCursor: string | null; hasMore: boolean }>(
       `/groups/${groupId}/messages?${query.toString()}`,
