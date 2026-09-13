@@ -4,7 +4,9 @@ import { Server as SocketIOServer, type Socket } from 'socket.io';
 import { registerAuthRoutes, type AuthRouteService } from './auth/routes.js';
 import { createAuthenticator } from './http/auth.js';
 import { registerGroupRoutes } from './groups/routes.js';
+import { registerMessageRoutes } from './messages/routes.js';
 import type { GroupsService } from './groups/service.js';
+import type { MessagesService } from './messages/service.js';
 import { registerHealthRoutes, type Readiness } from './health.js';
 
 export type RuntimeOptions = {
@@ -14,6 +16,7 @@ export type RuntimeOptions = {
   getGroupSyncState: (input: { groupId: string; userId: string }) => Promise<{ lastSeq: number } | null>;
   auth?: AuthRouteService;
   groups?: GroupsService;
+  messages?: MessagesService;
 };
 
 export type Runtime = {
@@ -58,6 +61,7 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
   await registerHealthRoutes(app, { getReadiness: options.getReadiness });
   if (options.auth) await registerAuthRoutes(app, options.auth);
   if (options.groups) await registerGroupRoutes(app, options.groups, createAuthenticator(options.jwtSecret));
+  if (options.messages) await registerMessageRoutes(app, options.messages, createAuthenticator(options.jwtSecret));
 
   io.use(async (socket, next) => {
     try {

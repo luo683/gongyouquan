@@ -57,6 +57,7 @@ export const errorEnvelopeSchema = z.object({
 export type ErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
 
 export const messageKindSchema = z.enum(['text', 'image', 'file', 'system', 'task_card']);
+export type MessageKind = z.infer<typeof messageKindSchema>;
 export const messageSendSchema = z.object({
   groupId: entityIdSchema,
   /** UUID, not any string: the column is UUID and the retry-reuse contract (spec 5.4) only works if the client cannot invent a non-reusable key. */

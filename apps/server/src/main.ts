@@ -4,6 +4,8 @@ import { createAuthRepository } from './auth/repository.js';
 import { createDatabase, checkDatabase, getOutboxLag, migrateDatabase, type Database } from './db/pool.js';
 import { createGroupsRepository } from './groups/repository.js';
 import { createGroupsService } from './groups/service.js';
+import { createMessagesRepository } from './messages/repository.js';
+import { createMessagesService } from './messages/service.js';
 import { buildApp, type Runtime, type RuntimeOptions } from './runtime.js';
 import { parseEnv, type ServerEnv } from './config/env.js';
 
@@ -34,6 +36,12 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
       jwtSecret: env.jwtSecret,
     }),
     groups: createGroupsService(createGroupsRepository(database)),
+    // The messages service reads membership through the groups repository on
+    // purpose: one guard implementation, not a second copy that can drift.
+    messages: createMessagesService(
+      createMessagesRepository(database),
+      createGroupsRepository(database),
+    ),
   };
 }
 
