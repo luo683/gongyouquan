@@ -4,8 +4,16 @@ import { runMigrations, type QueryClient } from './migrate.js';
 
 const { Pool } = pg;
 
+export type PoolStats = {
+  total: number;
+  idle: number;
+  waiting: number;
+};
+
 export type Database = QueryClient & {
   end(): Promise<void>;
+  /** 4.7's pgPoolTotal / pgPoolIdle / pgPoolWaiting. The pool already tracks these. */
+  stats(): PoolStats;
 };
 
 export function createDatabase(connectionString: string): Database {
@@ -26,6 +34,7 @@ export function createDatabase(connectionString: string): Database {
       }
     },
     end: () => pool.end(),
+    stats: () => ({ total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount }),
   };
 }
 
@@ -50,6 +59,23 @@ export async function getOutboxLag(database: QueryClient): Promise<number | null
         WHERE processed_at IS NULL`,
     );
     return result.rows[0]?.lag ?? 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 4.7's `outboxPending`: how many events are waiting, as opposed to getOutboxLag's
+ * answer of how old the oldest one is. The two must not be conflated - an age in
+ * seconds read as a count turns one stale event into an apparent backlog of
+ * thousands, and the ops manual's inspection item is about the backlog.
+ */
+export async function getOutboxPending(database: QueryClient): Promise<number | null> {
+  try {
+    const result = await database.query<{ pending: string | null }>(
+      'SELECT count(*) AS pending FROM outbox WHERE processed_at IS NULL',
+    );
+    return Number(result.rows[0]?.pending ?? 0);
   } catch {
     return null;
   }

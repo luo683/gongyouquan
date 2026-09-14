@@ -2,6 +2,7 @@ import { SignJWT } from 'jose';
 import { io as createClient, type Socket } from 'socket.io-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp, type Runtime } from '../src/runtime.js';
+import { createMetrics } from '../src/metrics.js';
 
 const secret = new TextEncoder().encode('test-secret');
 const clients: Socket[] = [];
@@ -252,5 +253,44 @@ describe('server runtime', () => {
     await settle();
 
     expect(heard).toEqual([{ groupId: 'group-1', userId: 'user-2' }]);
+  });
+
+  it('serves /internal/metrics to loopback and refuses the rest without the token', async () => {
+    const { runtime } = await startRuntime({
+      createMetrics: ({ wsConnections, presence }) =>
+        createMetrics({
+          wsConnections,
+          presenceMapSize: () => presence.size(),
+          presenceSocketCount: () => presence.socketCount(),
+          poolStats: () => ({ total: 20, idle: 19, waiting: 0 }),
+          outboxPending: async () => 0,
+          outboxLagSeconds: async () => 0,
+          contractVersion: 'test-contract',
+        }),
+      internalMetricsToken: 'sekrit',
+    });
+
+    const loopback = await runtime.app.inject({ method: 'GET', url: '/internal/metrics' });
+    expect(loopback.statusCode).toBe(200);
+    expect(loopback.json()).toMatchObject({ contractVersion: 'test-contract', pgPoolTotal: 20 });
+
+    // Caddy does not proxy /internal, so this should be unreachable in practice.
+    // The route does not rely on that: the Caddyfile is a file somebody can edit,
+    // and the payload is reconnaissance material.
+    const outside = await runtime.app.inject({
+      method: 'GET',
+      url: '/internal/metrics',
+      remoteAddress: '203.0.113.9',
+    });
+    expect(outside.statusCode).toBe(403);
+    expect(outside.json().error.code).toBe('FORBIDDEN_ROLE');
+
+    const withToken = await runtime.app.inject({
+      method: 'GET',
+      url: '/internal/metrics',
+      remoteAddress: '203.0.113.9',
+      headers: { authorization: 'Bearer sekrit' },
+    });
+    expect(withToken.statusCode).toBe(200);
   });
 });

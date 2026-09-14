@@ -1,7 +1,8 @@
 import { pathToFileURL } from 'node:url';
 import { createAuthService } from './auth/service.js';
 import { createAuthRepository } from './auth/repository.js';
-import { createDatabase, checkDatabase, getOutboxLag, migrateDatabase, type Database } from './db/pool.js';
+import { createDatabase, checkDatabase, getOutboxLag, getOutboxPending, migrateDatabase, type Database } from './db/pool.js';
+import { createMetrics } from './metrics.js';
 import { createGroupsRepository } from './groups/repository.js';
 import { createGroupsService } from './groups/service.js';
 import { createMessagesRepository } from './messages/repository.js';
@@ -39,6 +40,22 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
   return {
     jwtSecret: new TextEncoder().encode(env.jwtSecret),
     contractVersion: env.contractVersion,
+    internalMetricsToken: env.internalMetricsToken,
+    /**
+     * 4.7's metrics. This side owns the database; buildApp owns io and the presence
+     * map and hands them in. contractVersion is a string the frontend version guard
+     * compares against, so it is reported as-is rather than summarised.
+     */
+    createMetrics: ({ wsConnections, presence }) =>
+      createMetrics({
+        wsConnections,
+        presenceMapSize: () => presence.size(),
+        presenceSocketCount: () => presence.socketCount(),
+        poolStats: () => database.stats(),
+        outboxPending: () => getOutboxPending(database),
+        outboxLagSeconds: () => getOutboxLag(database),
+        contractVersion: env.contractVersion ?? CONTRACT_VERSION_FALLBACK,
+      }),
     getReadiness: async () => {
       const db = await checkDatabase(database);
       return {

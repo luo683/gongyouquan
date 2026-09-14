@@ -12,9 +12,10 @@ import {
   type MessageDto,
 } from '@gongyouquan/contracts';
 import { createPresence, createPresenceSweep, type Presence, type PresenceSweep } from './presence.js';
+import type { Metrics } from './metrics.js';
 import { registerAuthRoutes, type AuthRouteService } from './auth/routes.js';
 import { createAuthenticator } from './http/auth.js';
-import { HttpError } from './http/errors.js';
+import { errorEnvelope, HttpError } from './http/errors.js';
 import { registerGroupRoutes } from './groups/routes.js';
 import { registerMessageRoutes } from './messages/routes.js';
 import { registerMemberRoutes } from './groups/member-routes.js';
@@ -65,6 +66,17 @@ export type RuntimeOptions = {
   onPresenceDrift?: (drift: { tracked: number; engine: number }) => void;
   /** 30 seconds per spec 4.6; overridable so a test does not have to wait. */
   presenceSweepIntervalMs?: number;
+  /**
+   * 4.7's `/internal/metrics`. A factory rather than an instance, because the
+   * metrics need `io.engine.clientsCount` and the presence map - both created
+   * inside buildApp - while the pool and outbox sources live with the database in
+   * main.ts. Each side supplies what it owns: this keeps buildApp ignorant of the
+   * connection pool and main.ts ignorant of Socket.IO. Absent means the route is
+   * not registered at all.
+   */
+  createMetrics?: (socketSide: { wsConnections: () => number; presence: Presence }) => Metrics;
+  /** Required for any non-loopback caller of `/internal/metrics`. */
+  internalMetricsToken?: string;
 };
 
 export type Runtime = {
@@ -178,6 +190,41 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
       },
     },
   );
+
+  /**
+   * 4.7's metrics, built here because this is the first point where both halves
+   * exist: the caller supplies the pool and outbox sources, buildApp supplies the
+   * socket ones. Caddy only reverse-proxies /api, /socket.io, /healthz and /readyz,
+   * so this path is already unreachable from outside the container network - but
+   * that is a fact about a Caddyfile somebody can edit, and the payload carries
+   * pool sizes and connection counts, so loopback is allowed and anything else has
+   * to present the token.
+   */
+  const metrics: Metrics | undefined = options.createMetrics?.({
+    wsConnections: () => io.engine.clientsCount,
+    presence,
+  });
+  if (metrics) {
+    metrics.start();
+    app.get('/internal/metrics', async (request, reply) => {
+      const ip = request.ip;
+      const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+      const token = options.internalMetricsToken;
+      if (!loopback && !(token && request.headers.authorization === `Bearer ${token}`)) {
+        return reply.status(403).send(errorEnvelope(request, 'FORBIDDEN_ROLE'));
+      }
+      return metrics.collect();
+    });
+    app.addHook('onResponse', (request, reply, done) => {
+      // Probes are excluded from the 5xx denominator: at a 15-second interval they
+      // would otherwise swamp it and dilute a real error rate towards zero.
+      const url = request.url;
+      if (url !== '/healthz' && url !== '/readyz' && !url.startsWith('/internal/')) {
+        metrics.observeResponse(reply.statusCode);
+      }
+      done();
+    });
+  }
 
   io.use(async (socket, next) => {
     try {
@@ -323,6 +370,10 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
     socket.on('sync:pull', async (payload: unknown, ack?: (value: unknown) => void) => {
       await call(ack, async () => {
         if (!options.sync) throw new HttpError('INTERNAL_ERROR');
+        // Counted before validation on purpose: inspection item 14 reads the delta
+        // as a reconnection rate, and a client looping on malformed pulls is
+        // precisely the signal it is looking for.
+        metrics?.countSyncPull();
         const parsed = syncPullSchema.safeParse(payload);
         if (!parsed.success) throw new HttpError('INVALID_ARGUMENT');
         follow(parsed.data.groupId);
@@ -393,6 +444,7 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
   const close = (): Promise<void> => {
     closePromise ??= (async () => {
       sweep.stop();
+      metrics?.stop();
       detach?.();
       detachUser?.();
       await closeSocketServer(io);

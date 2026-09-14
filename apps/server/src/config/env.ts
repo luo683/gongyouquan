@@ -13,6 +13,14 @@ const rawEnvSchema = z.object({
   SYSTEM_GROUP_ID: z.string().min(1).optional(),
   OPS_APPROVER_GROUP_ID: z.string().min(1).optional(),
   CONTRACT_VERSION: z.string().min(1).optional(),
+  /**
+   * Optional. Loopback always reads /internal/metrics; this is what any other
+   * caller must present. It exists for the case where the port gets published by
+   * mistake - the payload carries pool sizes and connection counts, which is
+   * reconnaissance material rather than a secret in itself, but there is no reason
+   * to hand it out.
+   */
+  INTERNAL_METRICS_TOKEN: z.string().min(1).optional(),
   LOG_LEVEL: z.string().min(1).default('info'),
 });
 
@@ -29,6 +37,7 @@ export type ServerEnv = {
   systemGroupId?: string;
   opsApproverGroupId?: string;
   contractVersion?: string;
+  internalMetricsToken?: string;
   logLevel: string;
 };
 
@@ -47,6 +56,7 @@ export function parseEnv(input: Record<string, string | undefined>): ServerEnv {
     systemGroupId: parsed.SYSTEM_GROUP_ID,
     opsApproverGroupId: parsed.OPS_APPROVER_GROUP_ID,
     contractVersion: parsed.CONTRACT_VERSION,
+    internalMetricsToken: parsed.INTERNAL_METRICS_TOKEN,
     logLevel: parsed.LOG_LEVEL,
   };
 }
