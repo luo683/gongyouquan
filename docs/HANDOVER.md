@@ -9,7 +9,7 @@
 
 ## 1. 一句话现状
 
-后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；**已读回执两侧打通**（4.4.3 两档接口 + 前端 chip 与名单）；**`typing:*` 与 `presence:updated` 服务端已实现**（4.6 的内存映射、多端、30 秒兜底扫描），前端显示「谁正在输入」；浏览器端（React + Vite）可与后端真聊、未读徽标会真的消、**成员管理也能在界面上逐条点通**。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 模块、Electron 外壳、备份恢复演练与生产 secret 注入，**数据库与核心收发链路不再是阻塞项**。
+后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；**已读回执、typing、presence（含在线快照）、@提及四条都已两侧打通**；`sync:hello` 已接通，服务端 `contractVersion` 现在真的会到浏览器；浏览器端（React + Vite）可真聊、未读徽标会消、成员管理可逐条点通、能 @ 人并收到「@我」列表。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 模块、Electron 外壳、备份恢复演练与生产 secret 注入，**数据库与核心收发链路不再是阻塞项**。
 
 ---
 
@@ -18,14 +18,14 @@
 | 项 | 值 |
 |---|---|
 | 默认分支 | `main`（停在基线 `a322610`，尚未合并任何开发提交） |
-| 开发分支 | `feat/contracts-foundation`，**领先 `main` 44 个提交**（本文档自身的更新紧随其后，单独一个 docs 提交） |
-| 当前 HEAD | `de27a8d feat(server): typing relay and presence per spec 4.6` |
+| 开发分支 | `feat/contracts-foundation`，**领先 `main` 47 个提交**（本文档自身的更新紧随其后，单独一个 docs 提交） |
+| 当前 HEAD | `3bbc7f5 feat: @mentions end to end, with the leak they could have caused closed` |
 | 标签 | `m0-foundation` → `a322610`（仓库基线） |
 | 远端 | `origin` = `git@github.com:luo683/gongyouquan.git`，SSH，账号 `luo683` |
 | Git 身份 | `user.name=luo683`，`user.email=3012390263@qq.com` |
 | 提交约定 | `type(scope): summary`；一次提交只做一件可验证的事；不使用 `--force` |
 
-基线之后 44 个提交（旧→新）：
+基线之后 47 个提交（旧→新）：
 
 ```text
 3464abd feat(contracts): add shared transport schemas
@@ -71,6 +71,9 @@ f6d5637 feat(deploy): one command from empty volume to two people chatting
 b6736d2 feat(web): show read receipts, paying for each tier only when it is earned
 be37bef docs: record the receipts display policy and the createGroup half-open room
 de27a8d feat(server): typing relay and presence per spec 4.6
+c2e2bab docs: register the typing and presence gaps, and correct the cold-start story
+a533923 feat: wire the sync:hello handshake and put a presence snapshot in it
+3bbc7f5 feat: @mentions end to end, with the leak they could have caused closed
 ```
 
 ---
@@ -89,7 +92,7 @@ de27a8d feat(server): typing relay and presence per spec 4.6
 │   ├── src/presence.ts     在线状态内存映射 + 30 秒兜底扫描（4.6）
 │   ├── src/cli/create-admin.ts   首个账号引导（一次性）
 │   ├── src/runtime.ts      单进程装配 + Socket.IO 线
-│   └── tests/              21 个测试文件（含 integration/ 与 e2e/）
+│   └── tests/              22 个测试文件（含 integration/ 与 e2e/）
 ├── apps/web/               浏览器端（React + Vite + TS），复用 contracts schema
 │   └── src/{App.tsx,api.ts,copy.ts,syncStore.ts,main.tsx}
 ├── packages/contracts/     共享契约（Zod schema + 类型），前后端唯一真源
@@ -132,7 +135,8 @@ de27a8d feat(server): typing relay and presence per spec 4.6
 | **已读回执**：`?detail=0` 只付 `{readCount, totalMembers}`，`detail=1` 才多一次 `users` JOIN 付名单（4.4.3 的分级）；两侧都排除发送者、都只算 `removed_at IS NULL` 的成员；`:gid` 与消息实际所属群不符时**先于**成员判定返回 404，不可用来探测别群消息 id；排除发送者用 `IS DISTINCT FROM` 而非 `<>`，因为系统消息 `sender_id` 为 NULL，`<> NULL` 会把所有行过滤掉、静默报 0/0。取舍见 `decisions/0008` | `src/messages/repository.ts` `receipts()` |
 | **sync**：`sync:hello` 水位（只报调用者真正在的群）、`sync:pull` 按当前状态补投（不重放事件）、`asOfSeq` 永不倒退、`read:update` 双向 `GREATEST` 位点 | `src/sync/` |
 | **presence / typing**：在线状态只放进程内存（`Map<userId, Set<socketId>>`，不落库，4.6），多端只在集合**变空**时广播离线；`disconnect` 里**同步第一行**移除（放在 `await` 之后会在断开期间仍算在线、并向死连接广播）；30 秒兜底扫描**先量漂移再清理**（清理会修好泄漏，事后量就永远是干净的，探针等于没有）；`typing:*` 转发到房间且排除发送者，转发前查 `socket.rooms` —— 因为 `socket.to(room)` 不管发送者在不在房间里都投递 | `src/presence.ts`、`src/runtime.ts` |
-| Socket.IO 线：`sync:hello / sync:pull / message:send / message:edit / message:delete / read:update / typing:start / typing:stop`；出站另有 `presence:updated`、`typing:*`（带 `userId`）、`read:updated`；ack 一律是契约载荷或 `{error:{code,message}}`，`typing:*` 按 739 行**没有 ack** | `src/runtime.ts` |
+| **@提及**：`mentions` 由客户端给 id（服务端**校验**而不解析 body：去重、丢自己、丢非成员、上限 50），与消息同事务写 `message_mentions`（含冗余 `group_id` + `seq`，6.6 要求单索引可答「@我未读」）；提交后经 bus 的**个人通道**推 `mention:new` 到 `user:{uid}`；`GET /me/mentions` 跨群、游标是 messageId、`unread` 由 `mentions_read_seq` 在 SQL 里派生。**撤回消息的正文在这个列表里被置 null**，否则会绕过 `/raw` 的 owner/admin 门禁。取舍见 `decisions/0010` | `src/messages/`、`bus.ts` |
+| Socket.IO 线：`sync:hello / sync:pull / message:send / message:edit / message:delete / read:update / typing:start / typing:stop`；出站另有 `presence:updated`、`typing:*`（带 `userId`）、`read:updated`（群房间）与 `mention:new`（**个人房间 `user:{uid}`**，758 行）；ack 一律是契约载荷或 `{error:{code,message}}`，`typing:*` 按 739 行**没有 ack** | `src/runtime.ts` |
 | **首个账号引导**：`docker compose run --rm server node --import tsx src/cli/create-admin.ts` —— 一次性建 用户 + 系统群 + 邀请码并打印，登录自校验；重复运行拒绝；不在启动时自动执行 | `src/cli/create-admin.ts` |
 
 **已注册的 HTTP 路由**（`/api/v1` 前缀，除 health/auth 外均需 Bearer）：
@@ -146,6 +150,7 @@ POST   /groups/:gid/members            PATCH /groups/:gid/members/:uid   DELETE 
 POST   /groups/:gid/invites            GET /groups/:gid/invites          DELETE /groups/:gid/invites/:iid
 POST   /groups/:gid/messages           GET /groups/:gid/messages
 GET    /groups/:gid/messages/:mid/receipts        (?detail=0|1，4.4.3 分级)
+GET    /me/mentions                               (?unreadOnly=1&cursor=，跨群)
 PATCH  /messages/:mid                  DELETE /messages/:mid             GET /messages/:mid/raw
 GET    /groups/:gid/sync, /groups/:gid/sync-state    POST /groups/:gid/read
 ```
@@ -153,7 +158,10 @@ GET    /groups/:gid/sync, /groups/:gid/sync-state    POST /groups/:gid/read
 ### 浏览器端 `apps/web`
 
 - 邀请码注册 / 登录、群列表带服务端未读数
-- **冷启动实际走 `chooseGroup` 里的 `api.history` + `sync:pull`，不是 4.3.2 的 `sync:hello`→`sync:pull`**：全仓没有任何地方 emit `sync:hello`，所以 `sync:ready` 那段监听是**死代码**，服务端塞在里面的 `contractVersion` 永远送不到前端，说明书第 7 节的版本守卫从未生效。本轮 grep 事件名时发现的既有缺陷，待办与两个选项见 `decisions/0009` 第三节
+- **冷启动按 4.3.2 走 `sync:hello`→`sync:ready`→`sync:pull`**：连上即发 hello（带各群本地水位，从 ref 镜像读，重连时才是「现在」的群而不是登录时那批），`sync:ready` 过 `syncReadySchema` 校验后落水位、补投、存在线快照、记下 `contractVersion`。ack 只用来报错，不重复处理载荷——它与 `sync:ready` 是同一份数据，两边都处理会把水位应用两次。（此前客户端**从不发 hello**，`sync:ready` 是死代码、版本守卫从未生效，见 `decisions/0009` 第三节，已接通）
+- **契约版本只显示、不比对**：客户端没有构建期算出的 contracts hash 可比（§5 第 7 条），所以侧栏如实展示服务端下发的值。编一个假常量去 diff 只会「看起来像守卫而永不触发」，比没有守卫更坏
+- **「@我」**：输入框上方是一排成员 chip（点选即插入 `@名字` 到草稿并记下 id），发送时带 `mentions`；侧栏「@我」入口带会话内计数，展开是跨群列表（群名 + 谁 + 正文 + 未读标记），点一条跳到那个群。**刻意不从正文里解析 `@名字`**：显示名不唯一，名字不是身份
+- **在线标记**：成员面板里每人一枚「在线」标签，种子来自 `sync:ready` 的快照、之后由 `presence:updated` 增量维护，所以刷新后立刻就是对的，而不是要等谁碰巧重连
 - 发送与撤回走 socket ack；4.3.4 客户端状态机（`syncedSeq / pendingNew / eventBuffer`）抽成纯模块 `syncStore.ts`，有 9 个无浏览器单测
 - **「谁正在输入」**：输入时节流发 `typing:start`（3 秒一次），停顿 3 秒或发送即发 `typing:stop`；收到的每条 start 各自带一个 6 秒 TTL——739 行说这些信号可丢，中途消失的人永远不会发 stop，没有 TTL 就会一直挂着。页脚显示「某某 正在输入…」
 - 中文文案全部由 `code` 在前端映射（`copy.ts`，`errorEnvelope.message` 只进日志）；`RATE_LIMITED` 把等待秒数拼进提示；角色名（群主/管理员/成员）也在 `copy.ts`
@@ -174,9 +182,9 @@ GET    /groups/:gid/sync, /groups/:gid/sync-state    POST /groups/:gid/read
 ```text
 pnpm lint        eslint .                          → 0 error（lint 已是真实闸门，不再是空转）
 pnpm typecheck   3 包全过
-pnpm test        contracts 30 + server 65 + web 9 = 104 通过，server 63 个真库用例 skip
-真库闸门         INTEGRATION_DATABASE_URL 设上后 server 128 全过（含 63 个真库 + e2e 双人聊天）
-合计             25 文件 / 167 用例，全绿
+pnpm test        contracts 31 + server 67 + web 9 = 107 通过，server 72 个真库用例 skip
+真库闸门         INTEGRATION_DATABASE_URL 设上后 server 139 全过（含 72 个真库 + e2e 双人聊天）
+合计             26 文件 / 179 用例，全绿
 ```
 
 ### 未读徽标与读位点（已提交 `2ab03f8`）
@@ -194,7 +202,7 @@ socket handler 只注册一次，闭包里的 `selected` 会过期，所以用 `
 
 ## 5. 还没做到的（按重要性）
 
-1. **messages / sync 仍缺**：`mention:new`（要连带 `message_mentions` 的写入、body 里 @ 的解析、`GET /me/mentions`）、编辑/撤回窗口过期时 socket 侧对 `read:updated` 的推送。**已读回执两侧打通**；**`typing:*` 与 `presence:updated` 服务端已实现**，typing 前端也已显示，但 **presence 前端刻意没画**——说明书没有任何「此刻谁在线」的快照入口，画出来就是恒假的「全员离线」，见 `decisions/0009` 第二节。
+1. **messages / sync 仍缺**：编辑/撤回窗口过期时 socket 侧对 `read:updated` 的推送、以及前端推进 `mentions_read_seq` 的入口（`decisions/0010` 第五节：侧栏「@我」计数目前是**会话内**口径，不是服务端已读）。**已读回执、`typing:*`、`presence:updated`（含 `sync:ready` 里的在线快照，前端成员面板已画「在线」）、`mention:new` 均已两侧打通。**
 2. **整块未动的模块**：`tasks` / `files` / `search` / `ops`。其中 `ops` 含 `/hooks/*` 的幂等与聚合。
 3. **成员管理收尾**：离职转交的批量入口、`notification_prefs`、成员列表的 `includeRemoved` 查询参数。
 4. **改密接口**：`logout-all` 已实现，但目前只能由前端显式调用，没有「改密后强制全端下线」的入口。
@@ -255,7 +263,7 @@ pnpm --filter @gongyouquan/server dev
 
 ## 8. 说明书里的矛盾与取舍（`docs/decisions/`）
 
-0002-0009 多为 `open` 状态：**取舍已实现，但说明书本身还没修订**。接手后若与产品/需求方对齐，应回头关掉它们。
+0002-0010 多为 `open` 状态：**取舍已实现，但说明书本身还没修订**。接手后若与产品/需求方对齐，应回头关掉它们。
 
 | 文件 | 关键内容 |
 |---|---|
@@ -267,7 +275,8 @@ pnpm --filter @gongyouquan/server dev
 | `0006-messages-sync-contract-gaps.md` | messages 缺 `updated_at`（已补迁移 0002）、WS 与 HTTP 的 send ack 不一致、`clientMsgId` 该不该收成 UUID、`asOfSeq` 定义会让客户端位点倒退、本轮只发得出 text/system |
 | `0007-rate-limiting-tradeoffs.md` | 限流落地取舍 |
 | `0008-receipts-semantics.md` | 已读回执四处规格没写死：`totalMembers` 是否排除发送者（验收项 9 只钉了分子）、`:gid` 与消息不符时的响应、系统消息 `sender_id` 为 NULL 的排除写法、撤回消息还能不能查回执；第五节是前端展示策略 |
-| `0009-typing-presence-gaps.md` | 说明书**没有** server→client 的 typing 事件（只定义了客户端怎么发）、没有 presence 快照所以前端不画在线状态、以及**既有缺陷：浏览器端从不发 `sync:hello`**，导致 `sync:ready` 是死代码、`contractVersion` 版本守卫从未生效 |
+| `0009-typing-presence-gaps.md` | 说明书**没有** server→client 的 typing 事件（只定义了客户端怎么发）、没有 presence 快照（**已按选项 A 补进 `sync:ready`**）、以及**既有缺陷：浏览器端从不发 `sync:hello`**（**已接通**），此前导致 `sync:ready` 是死代码、`contractVersion` 版本守卫从未生效 |
+| `0010-mentions-gaps.md` | `MentionDTO` 说明书从未定义字段；第 161 行「解析 body 中的 @」与路由表的 `mentions?` 自相矛盾（取客户端给 id + 服务端校验）；**撤回消息正文不得从 `/me/mentions` 泄漏**（会绕过 `/raw` 门禁）；跨群游标用 messageId 且现有索引撑不住（待 1685 行的计划验证）；前端「@我」计数是会话内口径；`INSERTED_COLUMNS` 那句「新消息没有聚合」的注释被推翻，send 的 ack 必须重读 |
 
 几个**已拍死、改之前先看 decision** 的行为：
 
@@ -311,9 +320,10 @@ VITE_DEV_API_ORIGIN=http://127.0.0.1:3100 pnpm --filter @gongyouquan/web dev
 1. 切到 Node 22（§9 路径直接可用），消掉 `Unsupported engine` 警告。
 2. 拍板 `docs/decisions/0005` 的六条——尤其**矛盾一**：说明书 4.2 断言回滚会留 seq 空洞、验收表第 2 项要求「构造回滚事务 → 后续 seq 有跳跃」，但真库证明当前 `alloc_group_seq` 写法做不到。`asOfSeq` 那条「基石」的验收怎么写，取决于这个决定。
 3. 拍板 `docs/decisions/0008` 一节：**`totalMembers` 到底排不排除发送者**。当前实现排除（全员读完显示 `n/n`），说明书验收项 9 只钉了分子。这改的是用户天天看的数字，要产品侧确认；若要改成含发送者，分子必须一起改，否则分数没有意义。
-4. 拍板 `docs/decisions/0009` 第三节：**`sync:hello` 到底接不接**。浏览器端从不发它，所以 `sync:ready` 监听是死代码、说明书第 7 节的 `contractVersion` 版本守卫从未生效。要么让 `openSocket` 连上后发一次 hello（带各群本地水位）把 4.3.2 接通、顺带让守卫生效；要么明确放弃这条路径，把服务端 fallback 分支与前端监听一起删掉。**两头都留着是最差的选项**，因为它让人以为冷启动是按说明书走的。
-5. 同文件第二节：presence 前端要不要画。要画就得先解决「没有在线快照」——三个选项已列在那里，倾向给 `sync:ready` 加 `online: [userId]`。这一步与第 4 条是同一处代码，建议一起决定。
-6. 再做 `mention:new`（连带 `message_mentions` 写入、@ 解析、`GET /me/mentions`），之后才往 `tasks / files / search / ops` 走。
+4. 拍板 `docs/decisions/0010` 第二节：**mentions 到底以客户端给的 id 为准，还是按第 161 行去解析 body 里的 @**。当前实现取前者（契约与路由表两处都这么写），第 161 行因此作废，需要确认。
+5. 同文件第五节：前端要不要在打开「@我」列表时推进 `mentions_read_seq`。推了，「看了一眼」就等于「处理完了」，这个语义要产品侧认。
+6. `decisions/0009` 的两条已按选项 A 落地（`sync:hello` 接通、在线快照进 `sync:ready`），可以回头关掉。
+7. 之后才往 `tasks / files / search / ops` 走——这是仅剩的四个整块未动的模块。
 
 ---
 
@@ -336,3 +346,5 @@ VITE_DEV_API_ORIGIN=http://127.0.0.1:3100 pnpm --filter @gongyouquan/web dev
 15. **无 body 的 DELETE 不要带 `content-type: application/json`。** Fastify 直接回 `400 FST_ERR_CTP_EMPTY_JSON_BODY`，而且那个响应体是 Fastify 自己的形状（`statusCode/code/error/message`），**不是**我们的 error envelope——于是前端 `errorEnvelopeSchema` 解析失败、code 落到 `INTERNAL_ERROR`、`copy.ts` 里没有这个键，用户看到的是兜底的「出了点问题」。一次真实写操作就这样静默地从没发生过。`api.ts` 的 `call()` 原先无条件加这个头，`removeMember` / `revokeInvite` / `revoke` 三条 DELETE 全中招；撤回因为走 socket 而没被发现。修法是有 body 才加头。**只有真在浏览器里点一次才看得出来。**
 16. **验瞬时 UI 状态别用「操作完再快照」。** typing 指示器 3 秒空闲即消、TTL 6 秒，而一次工具往返比这更慢——每次都拍在它消失之后，看起来就像功能没做。正确做法是**在页面里装一个 MutationObserver 记录出现与消失的时刻**，再去触发，最后回读记录。「采样」验不了寿命比采样间隔短的东西。
 17. **`readyz` 的 `outboxLag` 是「最老未处理事件的年龄秒数」，不是条数**（`EXTRACT(EPOCH FROM now() - MIN(created_at)))`）。看到 2519 别以为是两千五百条积压——那是 42 分钟。而且 `ok` 只看 `db`，lag 再大也不影响就绪判定。没有 outbox worker 之前它会一直涨。
+18. **socket 事件不带 ack 回调，服务端曾经整个 handler 都不执行。** `call()` 的第一行是 `if (typeof ack !== 'function') return;`。因为 `follow()`（加入房间）就在这些 handler 里面，漏传 ack 的客户端会**静默地不收任何广播**——没有错误、没有 ack、日志里也没有。已改成「照做，只是不回 ack」，并有变异验证。教训：**一个只负责「回话」的包装函数，不该顺带决定「做不做事」**。
+19. **跑闸门会把 `packages/contracts/dist` 重写一遍，Vite 可能把写坏那一刻的模块缓存住。** 症状是浏览器报 `does not provide an export named 'errorEnvelopeSchema'`、页面白屏，而磁盘上的 dist 明明是对的（`?t=` 时间戳停在了那一刻）。**光重载页面没用**，要停掉 Vite、`rm -rf apps/web/node_modules/.vite`、再重启。这一轮踩了两次。
