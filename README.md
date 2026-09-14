@@ -18,13 +18,16 @@
 - 本地起法：`docker compose -f infra/db/docker-compose.yml up -d` → `pnpm --filter @gongyouquan/server dev` → `pnpm --filter @gongyouquan/web dev`（Vite 代理 `/api` 与 `/socket.io`）
 - 已落地限流：login 双维度、register、refresh 会话族、发消息双维度、写接口兜底（429 带 `Retry-After`），取舍见 `docs/decisions/0007`
 - 已落地：成员管理与邀请码（加人 / 踢人 / 退出 / 改角色 / 转让群主 + 邀请码增删查），按说明书 3.4 逐格有真库用例
-- 一键全栈：`docker compose -f infra/deploy/docker-compose.yml up -d`，再 `docker compose run --rm server node --import tsx src/cli/create-admin.ts` 建首个账号
-- 尚未接入：已读回执、typing/presence/mention 事件、tasks/files/search/ops、Electron、备份与恢复演练
+- 一键全栈（密钥不再写在仓库里，必须先注入）：`cp infra/deploy/.env.example infra/deploy/.env` → `infra/deploy/gen-secrets.sh` →
+  `docker compose -f infra/deploy/docker-compose.yml up -d --build`，再
+  `docker compose -f infra/deploy/docker-compose.yml run --rm --workdir /app/apps/server server node --import tsx src/cli/create-admin.ts` 建首个账号
+  （缺密钥时 `docker compose config` 直接拒绝解析，取舍见 `docs/decisions/0012`）
+- 尚未接入：tasks/files/search/ops、Electron；备份只有 `infra/backup/` 三个脚本，还没有跑它们的容器
 - 真实 PostgreSQL 验证**已完成**（PG 17.11）：建库、迁移连跑两次为 no-op、checksum 防篡改、auth/groups 的 SQL 真跑，
   固化为 `apps/server/tests/integration/` 与 `tests/e2e/`（47 个用例，分布在 3 个文件；由 `INTEGRATION_DATABASE_URL` 开关，不设则整体 skip）
 - 本地起库：`docker compose -f infra/db/docker-compose.yml up -d`（宿主端口 55432；镜像走 daocloud 源，Docker Hub 在本机不可达）
 - 真库首跑暴露的 6 条矛盾与缺口登记在 `docs/decisions/0005`，其中一条推翻说明书 4.2 关于 seq 空洞的论断
-- 仍未接入部署与运维，**不要把它当作可部署版本**
+- **不能直接对外上线**：还缺 `ops` 模块（`/hooks/*`、告警落点、巡检）、备份容器、systemd 与 `opsctl`；Caddy 在这个栈里是 `auto_https off` 的明文 :8080
 
 ## 目录约定
 

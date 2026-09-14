@@ -1,14 +1,24 @@
 # 工友圈 - one command, whole stack.
 #
+#   cp infra/deploy/.env.example infra/deploy/.env   # the five secrets are empty here
+#   infra/deploy/gen-secrets.sh                      # fills them, refuses to overwrite
 #   docker compose -f infra/deploy/docker-compose.yml up -d --build
+#   docker compose -f infra/deploy/docker-compose.yml run --rm server \
+#     node --import tsx src/cli/create-admin.ts      # prints the first account
 #   open http://localhost:8080
 #   docker compose -f infra/deploy/docker-compose.yml down       # keeps the volume
 #   docker compose -f infra/deploy/docker-compose.yml down -v    # throws the data away
 #
-# Secrets here are development values, and the file is committed on purpose: this
-# stack is the demo target, not a production deployment. Production must inject
-# DATABASE_URL / JWT_SECRET / ALERT_HMAC_SECRET from outside and must not reuse
-# any string below.
+# Every secret below is a required interpolation (`VAR:?message`), so
+# `docker compose config` refuses to parse rather than quietly booting a stack
+# whose credentials anyone can read off GitHub. A committed default would be the
+# same thing under a different name, which is why there are none left in here -
+# including the old db/01-set-password.sql, which stated the development
+# password in a file that ships with the repository.
+#
+# This is still a demo target and not a production deployment: Caddy serves plain
+# http on :8080, there is no meilisearch and no uptime-kuma, and the backups
+# volume has no offsite copy until RESTIC_REPOSITORY is configured.
 #
 # All values are quoted. `*` and `&` are YAML indicators, and an unquoted
 # `***` here is parsed as an undefined anchor - the file fails before Docker ever
@@ -21,21 +31,30 @@ services:
     # development machine in this project (docs/decisions/0002).
     image: docker.m.daocloud.io/library/postgres:17-alpine
     environment:
-      POSTGRES_USER: 'gongyouquan'
-      POSTGRES_PASSWORD: 'dev-db-pass…-only'
-      POSTGRES_DB: 'gongyouquan'
+      POSTGRES_USER: '${POSTGRES_USER:?POSTGRES_USER 未设置（cp .env.example .env 后跑 gen-secrets.sh）}'
+      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置（见 infra/deploy/.env.example）}'
+      POSTGRES_DB: '${POSTGRES_DB:?POSTGRES_DB 未设置（见 infra/deploy/.env.example）}'
       # Verified rather than assumed: a wrong password from another container is
       # refused with 28P01, so non-localhost connections do require the secret.
       # The image's own localhost `trust` lines stay in place regardless of this
-      # variable, which is why the init script below is what actually pins the
-      # credential.
+      # variable.
       POSTGRES_HOST_AUTH_METHOD: 'scram-sha-256'
     volumes:
       - dbdata:/var/lib/postgresql/data
-      # Applied once, on an empty data directory. See the file's own comment.
-      - ./db:/docker-entrypoint-initdb.d:ro
+      # No initdb.d here. There used to be a 01-set-password.sql that ran
+      # `ALTER USER ... PASSWORD 'dev-db-password-only'` because POSTGRES_PASSWORD
+      # alone was believed to leave the role's SCRAM verifier mismatched. It does
+      # not: a freshly generated password, including one containing space `@ / +`
+      # `=`, authenticates from a neighbouring container on this image. What that
+      # file actually did was commit a credential.
+      #
+      # Consequence worth knowing: POSTGRES_PASSWORD is only applied to an
+      # existing volume by ALTER USER (手册 4.1 的轮换影响一栏). Changing it in
+      # .env and re-running `up -d` leaves a database that rejects the new value.
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U gongyouquan -d gongyouquan']
+      # $$ so compose leaves the expansion to the container's own shell: the
+      # names never have to be repeated in a file that is rendered by config.
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
       interval: 5s
       timeout: 3s
       retries: 20
@@ -48,15 +67,24 @@ services:
       NODE_ENV: 'production'
       PORT: '3000'
       # The service name, not localhost: containers reach each other by network.
-      DATABASE_URL: 'postgres://gongyouquan:dev-db-password-only@db:5432/gongyouquan'
-      JWT_SECRET: 'dev-on…only'
+      # The three names below are already required by the `db` service, and one
+      # `:?` anywhere in the file fails the whole parse, so repeating the message
+      # here would only add three copies of the same sentence.
+      # POSTGRES_PASSWORD must stay URL-safe (gen-secrets.sh makes it hex) - see
+      # docs/decisions/0012.
+      DATABASE_URL: 'postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}'
+      JWT_SECRET: '${JWT_SECRET:?JWT_SECRET 未设置（见 infra/deploy/.env.example）}'
       UPLOAD_DIR: '/var/lib/gongyouquan/uploads'
       PUBLIC_ORIGIN: 'http://localhost:8080'
       # Meilisearch is intentionally absent from the stack: the spec's degraded
       # path is PG pg_trgm, and that is what the real database already verified.
       MEILI_URL: 'http://127.0.0.1:7700'
-      MEILI_MASTER_KEY: 'dev-meili-key'
-      ALERT_HMAC_SECRET: 'dev-alert-hmac-secret'
+      # Required because apps/server refuses to start with an empty one, not
+      # because anything here talks to it. Requiring it now means the day
+      # meilisearch is added there is no literal left in a committed file to
+      # replace.
+      MEILI_MASTER_KEY: '${MEILI_MASTER_KEY:?MEILI_MASTER_KEY 未设置（见 infra/deploy/.env.example）}'
+      ALERT_HMAC_SECRET: '${ALERT_HMAC_SECRET:?ALERT_HMAC_SECRET 未设置（见 infra/deploy/.env.example）}'
       LOG_LEVEL: 'info'
       # Injected rather than computed at build time; sync:hello carries it so an
       # old client can warn instead of drifting silently.
