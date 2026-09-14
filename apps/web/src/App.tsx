@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GroupSummaryDto, InviteDto, MemberDto, MessageDto, MessageReceiptsDto, PresenceUpdatedEvent, ReadUpdatedEvent, TypingEvent } from '@gongyouquan/contracts';
+import type { GroupSummaryDto, InviteDto, MemberDto, MentionDto, MessageDto, MessageReceiptsDto, PresenceUpdatedEvent, ReadUpdatedEvent, TypingEvent } from '@gongyouquan/contracts';
 import { syncReadySchema } from '@gongyouquan/contracts';
 import { io, type Socket } from 'socket.io-client';
 import { api, ApiError, clearSession, hasSession, setSession, type Tokens } from './api.js';
@@ -96,6 +96,18 @@ export function App() {
    */
   const [contractVersion, setContractVersion] = useState<string | null>(null);
   /**
+   * Who the message being composed will mention. Kept as ids rather than parsed out
+   * of the text: spec 6.6 stores mentions as rows keyed by user id, and guessing
+   * them back out of "@张三" would break the moment two members share a display
+   * name - which the schema does not forbid.
+   */
+  const [mentionIds, setMentionIds] = useState<string[]>([]);
+  const [mentionList, setMentionList] = useState<MentionDto[]>([]);
+  const [mentionsOpen, setMentionsOpen] = useState(false);
+  const [unreadMentions, setUnreadMentions] = useState(0);
+  /** Ref mirror for the same reason as selectedRef: the socket handler is registered once. */
+  const mentionsOpenRef = useRef(false);
+  /**
    * Mirrors groupList for the connect handler. A reconnect has to report the
    * groups the user is in *now*, not the ones captured when they signed in, or a
    * group joined mid-session would never be hello'd and so never pushed to.
@@ -136,6 +148,29 @@ export function App() {
       setNotice(error instanceof ApiError ? error.message : '群列表拉取失败');
     }
   }, [setGroupList]);
+
+  /**
+   * The cross-group @我 list. Opening it clears the local counter, and that is all
+   * the counter is: a "since you last looked" figure. The server's own
+   * mentions_read_seq line only advances through read:update, which nothing here
+   * sends, so this must not be presented as a server-confirmed read state.
+   */
+  const loadMentions = useCallback(async () => {
+    try {
+      const page = await api.mentions({ limit: 50 });
+      setMentionList(page.items);
+      setUnreadMentions(0);
+    } catch (error) {
+      setNotice(error instanceof ApiError ? error.message : '提及列表拉取失败');
+    }
+  }, []);
+
+  const toggleMentions = useCallback(async () => {
+    const opening = !mentionsOpenRef.current;
+    mentionsOpenRef.current = opening;
+    setMentionsOpen(opening);
+    if (opening) await loadMentions();
+  }, [loadMentions]);
 
   /**
    * Cold start follows 4.3.2 exactly: hello first, then pull every group whose
@@ -228,6 +263,16 @@ export function App() {
         else delete next[event.userId];
         onlineRef.current = next;
         setOnlineUsers(next);
+      });
+      /**
+       * Delivered to user:{uid}, not to a group room, so this fires whichever room
+       * is on screen - that is exactly why line 758 puts it there. The counter is
+       * bumped unconditionally; the list is only re-read when it is open, because
+       * fetching a cross-group list nobody is looking at is work for nothing.
+       */
+      socket.on('mention:new', () => {
+        setUnreadMentions((count) => count + 1);
+        if (mentionsOpenRef.current) void loadMentions();
       });
     },
     [commit],
@@ -357,7 +402,7 @@ export function App() {
     // clientMsgId is generated once per composition and reused by the server-side
     // idempotency key if we ever retry; the socket ack is what turns it into a
     // real message, so nothing is rendered as sent before then.
-    socket.emit('message:send', { groupId: selected, clientMsgId: crypto.randomUUID(), kind: 'text', body }, (
+    socket.emit('message:send', { groupId: selected, clientMsgId: crypto.randomUUID(), kind: 'text', body, mentions: mentionIds }, (
       response: { message?: MessageDto; error?: { code: string; details?: unknown } },
     ) => {
       if (response?.error) {
@@ -365,6 +410,9 @@ export function App() {
         return;
       }
       if (response?.message) commit(response.message.groupId, (state) => void applyNew(state, response.message as MessageDto));
+      // Cleared on success only: a refused send must not cost the author the list
+      // they picked, or retrying means starting the composition over.
+      setMentionIds([]);
     });
   }
 
@@ -741,6 +789,28 @@ export function App() {
         <button type="button" className="link" onClick={() => void refreshGroups()}>
           刷新群列表
         </button>
+        <button type="button" className="link" aria-expanded={mentionsOpen} onClick={() => void toggleMentions()}>
+          {mentionsOpen ? '收起 @我' : '@我'}
+          {unreadMentions > 0 ? <em className="badge">{unreadMentions}</em> : null}
+        </button>
+        {mentionsOpen ? (
+          <ul className="mentions">
+            {mentionList.map((mention) => (
+              <li key={mention.messageId}>
+                <button type="button" className="row" onClick={() => void chooseGroup(mention.groupId)}>
+                  <span className="mention-line">
+                    <strong>{mention.groupName}</strong>
+                    <span className="sub">
+                      {mention.fromDisplayName}：{mention.body ?? '（该消息已撤回）'}
+                    </span>
+                  </span>
+                  {mention.unread ? <em className="tag on">未读</em> : null}
+                </button>
+              </li>
+            ))}
+            {mentionList.length === 0 ? <li className="empty">还没有人 @ 你。</li> : null}
+          </ul>
+        ) : null}
         <form
           className="newgroup"
           onSubmit={(event) => {
@@ -887,6 +957,41 @@ export function App() {
               })}
               {current.messages.length === 0 ? <li className="empty">还没有消息。</li> : null}
             </ol>
+            {/*
+              Picking from the roster rather than parsing "@name" out of the text:
+              two members can share a display name and nothing forbids it, so a
+              name is not an identity. The text insertion is for the humans reading
+              the room; the id list is what the server stores.
+            */}
+            {!archived && members.length > 1 ? (
+              <div className="picker" role="group" aria-label="提及谁">
+                <span className="sub">@</span>
+                {members
+                  .filter((member) => member.userId !== tokens?.user.id)
+                  .map((member) => {
+                    const picked = mentionIds.includes(member.userId);
+                    return (
+                      <button
+                        key={member.userId}
+                        type="button"
+                        className={picked ? 'chip on' : 'chip'}
+                        aria-pressed={picked}
+                        onClick={() => {
+                          setMentionIds((previous) =>
+                            picked ? previous.filter((id) => id !== member.userId) : [...previous, member.userId],
+                          );
+                          const label = `@${member.displayName} `;
+                          setDraft((previous) =>
+                            picked ? previous.replaceAll(label, '') : previous.includes(label) ? previous : previous + label,
+                          );
+                        }}
+                      >
+                        {member.displayName}
+                      </button>
+                    );
+                  })}
+              </div>
+            ) : null}
             <form
               className="compose"
               onSubmit={(event) => {

@@ -1,4 +1,4 @@
-import type { MessageDto, MessageKind, MessageReceiptsDto } from '@gongyouquan/contracts';
+import type { MentionDto, MessageDto, MessageKind, MessageReceiptsDto } from '@gongyouquan/contracts';
 import type { QueryClient } from '../db/migrate.js';
 
 type Row = Record<string, unknown>;
@@ -27,7 +27,11 @@ function messageColumns(a: string): string {
   (SELECT mr.ref_message_id::text FROM message_refs mr WHERE mr.message_id = ${a}.id) AS ref_message_id`;
 }
 
-/** INSERT ... RETURNING cannot carry the aggregates, and a fresh text message genuinely has none. */
+/**
+ * INSERT ... RETURNING cannot carry the aggregates. A fresh text message has no
+ * attachments or refs, but it CAN have mentions now, so send() re-reads the full
+ * row whenever it wrote any - see the note there.
+ */
 const INSERTED_COLUMNS = `
   id, group_id, seq, sender_id, client_msg_id, kind, body, task_id, meta,
   created_at, edited_at, deleted_at, deleted_by, updated_at`;
@@ -139,13 +143,20 @@ export type RevokeOutcome =
 export type MessageRepository = {
   findMessage(messageId: string): Promise<MessageDto | null>;
   findByClientMsgId(senderId: string, clientMsgId: string): Promise<MessageDto | null>;
-  send(input: { groupId: string; senderId: string; clientMsgId: string; body: string }): Promise<SendOutcome>;
+  send(input: { groupId: string; senderId: string; clientMsgId: string; body: string; mentions: string[] }): Promise<SendOutcome>;
   applyEdit(input: { messageId: string; actorId: string; body: string }): Promise<EditOutcome>;
   applyRevoke(input: { messageId: string; actorId: string; moderator: boolean }): Promise<RevokeOutcome>;
   listBefore(input: { groupId: string; beforeSeq: number | null; limit: number }): Promise<{ items: MessageDto[]; hasMore: boolean }>;
   listAfter(input: { groupId: string; sinceSeq: number; limit: number }): Promise<{ items: MessageDto[]; hasMore: boolean }>;
   /** 已读回执分级（spec 4.4.3）：detail=false 只付两个数，true 才多付一份名单。 */
   receipts(input: { groupId: string; senderId: string | null; seq: number; detail: boolean }): Promise<MessageReceiptsDto>;
+  /** GET /me/mentions —— 跨群，游标是 messageId，`unreadOnly` 走 `mentions_read_seq`（6.6）。 */
+  listMentions(input: {
+    userId: string;
+    unreadOnly: boolean;
+    cursor: string | null;
+    limit: number;
+  }): Promise<{ items: MentionDto[]; hasMore: boolean }>;
 };
 
 export function createMessagesRepository(database: QueryClient): MessageRepository {
@@ -164,7 +175,7 @@ export function createMessagesRepository(database: QueryClient): MessageReposito
       return selectOne(`${SELECT_MESSAGE} WHERE m.sender_id = $1 AND m.client_msg_id = $2`, [senderId, clientMsgId]);
     },
 
-    async send({ groupId, senderId, clientMsgId, body }) {
+    async send({ groupId, senderId, clientMsgId, body, mentions }) {
       try {
         return await withSession(database, async (session) => {
           await session.query('BEGIN');
@@ -184,12 +195,52 @@ export function createMessagesRepository(database: QueryClient): MessageReposito
             const row = inserted.rows[0];
             if (!row) throw new Error('MESSAGE_INSERT_FAILED');
 
+            /**
+             * Same transaction as the message, so a committed message and its
+             * mentions can never disagree and a rolled-back send leaves neither
+             * behind. group_id and seq are denormalised on purpose: 6.6 wants
+             * "@我未读" answerable from one index without joining messages.
+             *
+             * One set-based insert rather than a round trip per mention, and
+             * ON CONFLICT DO NOTHING because the primary key is
+             * (message_id, mentioned_user_id) - a client listing the same person
+             * twice must not fail the whole send.
+             */
+            if (mentions.length > 0) {
+              await session.query(
+                `INSERT INTO message_mentions (message_id, mentioned_user_id, group_id, seq)
+                 SELECT $1, mentioned.uid, $2, $3
+                   FROM unnest($4::bigint[]) AS mentioned(uid)
+                 ON CONFLICT DO NOTHING`,
+                [row.id, groupId, seq, mentions],
+              );
+            }
+
             // Same transaction as the message: a committed message always has its
             // outbox event; a rolled-back one leaves neither behind (spec 6.9).
             await writeOutboxUpsert(session, row, 'send');
 
+            /**
+             * INSERT ... RETURNING cannot carry the aggregates, and the row above
+             * therefore has no mentions on it. That used to be harmless - a fresh
+             * text message genuinely had none - and stopped being true the moment
+             * mentions are written in this same transaction. The ack is the client's
+             * authoritative copy (4.3.4), so handing back a DTO that claims nobody
+             * was mentioned would render that way until a reload.
+             *
+             * Re-read only when something was written, so the common case still
+             * costs no extra query.
+             */
+            if (mentions.length === 0) {
+              await session.query('COMMIT');
+              return { kind: 'created', message: messageFromRow(row) } satisfies SendOutcome;
+            }
+            const full = await session.query<Row>(`${SELECT_MESSAGE} WHERE m.id = $1`, [row.id]);
+            const fullRow = full.rows[0];
+            if (!fullRow) throw new Error('MESSAGE_INSERT_FAILED');
+
             await session.query('COMMIT');
-            return { kind: 'created', message: messageFromRow(row) } satisfies SendOutcome;
+            return { kind: 'created', message: messageFromRow(fullRow) } satisfies SendOutcome;
           } catch (error) {
             await session.query('ROLLBACK');
             throw error;
@@ -391,6 +442,49 @@ export function createMessagesRepository(database: QueryClient): MessageReposito
           displayName: String(row.display_name),
           lastReadSeq: Number(row.last_read_seq),
         })),
+      };
+    },
+
+    async listMentions({ userId, unreadOnly, cursor, limit }) {
+      const result = await database.query<Row>(
+        `SELECT mm.message_id, m.group_id, g.name AS group_name, m.seq,
+                m.sender_id, COALESCE(sender.display_name, 'System') AS from_display_name,
+                CASE WHEN m.deleted_at IS NULL THEN m.body ELSE NULL END AS body,
+                m.created_at,
+                m.seq > COALESCE(rp.mentions_read_seq, 0) AS unread
+           FROM message_mentions mm
+           JOIN messages m ON m.id = mm.message_id
+           JOIN groups g ON g.id = m.group_id
+           LEFT JOIN users sender ON sender.id = m.sender_id
+           LEFT JOIN read_positions rp ON rp.group_id = m.group_id AND rp.user_id = $1
+          WHERE mm.mentioned_user_id = $1
+            AND ($2::boolean = false OR m.seq > COALESCE(rp.mentions_read_seq, 0))
+            AND ($3::bigint IS NULL OR mm.message_id < $3)
+          ORDER BY mm.message_id DESC
+          LIMIT $4`,
+        [userId, unreadOnly, cursor, limit + 1],
+      );
+      /**
+       * The CASE on body is a gate, not a nicety. `/messages/:mid/raw` puts a
+       * revoked message's original text behind owner/admin, and this list is
+       * readable by any member - so handing the body over here would let anyone
+       * read text the moderator path deliberately withholds. The row still appears,
+       * because being told you were mentioned is not the same as being shown what
+       * was said.
+       */
+      return {
+        items: result.rows.slice(0, limit).map((row) => ({
+          messageId: String(row.message_id),
+          groupId: String(row.group_id),
+          groupName: String(row.group_name),
+          seq: Number(row.seq),
+          fromUserId: text(row.sender_id),
+          fromDisplayName: String(row.from_display_name),
+          body: text(row.body),
+          createdAt: stamp(row.created_at),
+          unread: Boolean(row.unread),
+        })),
+        hasMore: result.rows.length > limit,
       };
     },
   };

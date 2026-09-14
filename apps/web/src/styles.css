@@ -25,7 +25,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .dot { font-size: .7rem; color: #b3261e; }
 .dot.on { color: #188038; }
 .link { background: 0; border: 0; color: #2f6feb; cursor: pointer; padding: 0; font: inherit; }
-.room { display: grid; grid-template-rows: auto 1fr auto auto; padding: .8rem 1rem; overflow: hidden; }
+.room { display: grid; grid-template-rows: auto 1fr auto auto auto; padding: .8rem 1rem; overflow: hidden; }
 .stream { list-style: none; margin: .4rem 0; padding: 0; overflow: auto; display: grid; gap: .3rem; align-content: start; }
 .msg { display: grid; grid-template-columns: 5.5rem 1fr auto auto auto; gap: .5rem; align-items: baseline; padding: .3rem .4rem; border-radius: 6px; }
 .msg:nth-child(odd) { background: #fff; }
@@ -75,3 +75,9 @@ select { padding: .4rem; border: 1px solid #d4d6db; border-radius: 7px; font: in
 .typing { color: #2f6feb; margin-right: .5rem; }
 .tag.on { color: #188038; border-color: #b7dfc3; }
 .version { margin: .6rem 0 0; font-size: .7rem; opacity: .7; }
+.picker { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; margin-top: .4rem; }
+.chip { background: #eef0f3; border: 1px solid transparent; border-radius: 999px; padding: .15rem .55rem; cursor: pointer; font: inherit; font-size: .78rem; }
+.chip.on { background: #e7effd; border-color: #2f6feb; color: #2f6feb; }
+.mentions { list-style: none; padding: 0; margin: .3rem 0; display: grid; gap: .2rem; }
+.mention-line { display: grid; gap: .1rem; min-width: 0; }
+.mention-line .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

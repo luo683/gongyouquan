@@ -72,7 +72,12 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
     // attaches the Socket.IO emitter to it, so nothing in src/messages needs to
     // know what a room is.
     bus,
-    messages: createMessagesService(messagesRepo, groupsRepo, { publish: bus.publish, limiter }),
+    messages: createMessagesService(messagesRepo, groupsRepo, {
+      publish: bus.publish,
+      // Personal channel: mention:new goes to user:{uid}, not group:{gid}.
+      publishMention: bus.publishToUser,
+      limiter,
+    }),
     // Membership is read through the groups repository on purpose: one guard
     // implementation, not a second copy that can drift.
     sync: createSyncService({

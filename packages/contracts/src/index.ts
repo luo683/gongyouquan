@@ -235,6 +235,43 @@ export const messagePageSchema = z.object({
 });
 export type MessagePage = z.infer<typeof messagePageSchema>;
 
+/**
+ * 说明书 637 行的路由表点名了 `MentionDTO`，却从未定义它的字段——这一份是我们的，
+ * 记在 `docs/decisions/0010`。
+ *
+ * 带上 `groupName` 是因为这个列表**跨群**，光一个 groupId 对人没有意义；带上
+ * `fromDisplayName` 是因为 `MessageDto` 刻意不含发送者名字（5.4）。`unread` 由
+ * `read_positions.mentions_read_seq` 派生（6.6），那是与 `last_read_seq` 独立的
+ * 另一条消费进度线：群消息读完了，不代表「@我的」也处理完了。
+ */
+export const mentionDtoSchema = z.object({
+  messageId: entityIdSchema,
+  groupId: entityIdSchema,
+  groupName: z.string(),
+  seq: z.number().int().nonnegative(),
+  fromUserId: entityIdSchema.nullable(),
+  fromDisplayName: z.string(),
+  body: z.string().nullable(),
+  createdAt: apiTimestampSchema,
+  unread: z.boolean(),
+});
+export type MentionDto = z.infer<typeof mentionDtoSchema>;
+
+/** GET /me/mentions —— 游标是 messageId，跨群所以不能用 seq（每个群各自编号）。 */
+export const mentionQuerySchema = z.object({
+  unreadOnly: z.enum(['0', '1']).optional().transform((value) => value === '1'),
+  cursor: entityIdSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+export type MentionQuery = z.infer<typeof mentionQuerySchema>;
+
+export const mentionPageSchema = z.object({
+  items: z.array(mentionDtoSchema),
+  nextCursor: z.string().nullable(),
+  hasMore: z.boolean(),
+});
+export type MentionPage = z.infer<typeof mentionPageSchema>;
+
 // ---------- sync:hello / sync:ready / sync:pull -------------------------
 
 /** 客户端每个群上报自己已连续应用的最高 seq；未上报的群收不到增量。 */

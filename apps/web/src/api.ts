@@ -4,6 +4,7 @@ import {
   groupSummaryDtoSchema,
   inviteDtoSchema,
   memberDtoSchema,
+  mentionDtoSchema,
   messageDtoSchema,
   messageReceiptsDtoSchema,
   messageSendResultSchema,
@@ -12,6 +13,7 @@ import {
   type GroupSummaryDto,
   type InviteDto,
   type MemberDto,
+  type MentionDto,
   type MessageDto,
   type MessageReceiptsDto,
   type MessageSendResult,
@@ -193,6 +195,36 @@ export const api = {
   /** DELETE /groups/:gid/invites/:iid - 204, and idempotent: revoking an already-revoked code is not an error. */
   revokeInvite: (groupId: string, inviteId: string) =>
     call<void>(`/groups/${groupId}/invites/${inviteId}`, { method: 'DELETE', schema: { parse: (value: unknown) => value } }),
+
+  /**
+   * GET /me/mentions - cross-group and scoped to the caller, so there is no group
+   * id in the path. `unreadOnly` is derived server-side from
+   * read_positions.mentions_read_seq, which 6.6 keeps separate from last_read_seq:
+   * having read a room is not the same as having dealt with the messages that
+   * named you.
+   */
+  mentions: async (
+    query: { unreadOnly?: boolean; cursor?: string; limit?: number } = {},
+  ): Promise<{ items: MentionDto[]; nextCursor: string | null; hasMore: boolean }> => {
+    const params = new URLSearchParams({ limit: String(query.limit ?? 50) });
+    if (query.unreadOnly) params.set('unreadOnly', '1');
+    if (query.cursor) params.set('cursor', query.cursor);
+    const page = await call<{ items: unknown[]; nextCursor: string | null; hasMore: boolean }>(
+      `/me/mentions?${params.toString()}`,
+      {
+        method: 'GET',
+        schema: {
+          parse: (value: unknown): { items: unknown[]; nextCursor: string | null; hasMore: boolean } =>
+            value as { items: unknown[]; nextCursor: string | null; hasMore: boolean },
+        },
+      },
+    );
+    return {
+      items: page.items.map((row) => mentionDtoSchema.parse(row)),
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
+    };
+  },
 
   history: async (
     groupId: string,

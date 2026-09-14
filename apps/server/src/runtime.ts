@@ -380,12 +380,21 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
   const detach = options.bus?.attach((event: string, message: MessageDto) => {
     io.to('group:' + message.groupId).emit(event, message);
   });
+  /**
+   * The personal channel. `user:{uid}` is joined on connection, so a mention
+   * reaches you whichever room you are looking at - which is the point of line
+   * 758 putting mention:new here rather than in the group room.
+   */
+  const detachUser = options.bus?.attachToUser((_event, payload, toUserId) => {
+    io.to('user:' + toUserId).emit('mention:new', payload);
+  });
 
   let closePromise: Promise<void> | undefined;
   const close = (): Promise<void> => {
     closePromise ??= (async () => {
       sweep.stop();
       detach?.();
+      detachUser?.();
       await closeSocketServer(io);
       try {
         await app.close();

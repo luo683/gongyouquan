@@ -1,4 +1,4 @@
-import type { GroupRole, MessageDto, MessageHistoryQuery, MessageReceiptsDto, MessageSend } from '@gongyouquan/contracts';
+import type { GroupRole, MentionDto, MentionNewEvent, MentionQuery, MessageDto, MessageHistoryQuery, MessageReceiptsDto, MessageSend } from '@gongyouquan/contracts';
 import { HttpError, RateLimitedError } from '../http/errors.js';
 import { LIMITS, type RateLimiter } from '../http/rate-limit.js';
 import { requireMembership, requireRole, requireWritable, type GroupMembership } from '../groups/guards.js';
@@ -16,6 +16,9 @@ export type RawMessage = {
 };
 
 const MODERATOR_ROLES: GroupRole[] = ['owner', 'admin'];
+
+/** Spec 3.3 caps a group at 50, so more mentions than that is not a real case. */
+const MAX_MENTIONS = 50;
 
 function isModerator(role: GroupRole): boolean {
   return MODERATOR_ROLES.includes(role);
@@ -35,8 +38,17 @@ export type MessagePublisher = (event: MessageEvent, message: MessageDto) => voi
 
 export type MessageEvent = 'message:new' | 'message:updated' | 'message:deleted';
 
+/**
+ * `mention:new` cannot ride the publisher above. That one is fanned out to
+ * `group:{gid}`, and line 758 puts mention:new in `user:{uid}` on purpose: being
+ * mentioned is a personal event that has to reach you whichever room you are
+ * looking at, including one in a different group.
+ */
+export type MentionPublisher = (event: MentionNewEvent, toUserId: string) => void | Promise<void>;
+
 export type MessagesServiceOptions = {
   publish?: MessagePublisher;
+  publishMention?: MentionPublisher;
   /**
    * Rate policy. It lives on the service rather than on either transport because
    * spec 8.2 says 发消息（WS 与 HTTP 共用计数） - one bucket per user and group.
@@ -53,6 +65,10 @@ export function createMessagesService(
 ) {
   const publish = async (event: MessageEvent, message: MessageDto): Promise<void> => {
     if (options.publish) await options.publish(event, message);
+  };
+  /** Absent means no-op, so the unit tests that never open a socket still run. */
+  const publishMention = async (event: MentionNewEvent, toUserId: string): Promise<void> => {
+    if (options.publishMention) await options.publishMention(event, toUserId);
   };
 
   const { limiter } = options;
@@ -103,15 +119,44 @@ export function createMessagesService(
         LIMITS.sendPerUserGroup.windowMs,
       );
       await writableMembership(input.groupId, actor);
+
+      /**
+       * The ids arrive from the client, so membership is checked here rather than
+       * trusted. Without it anybody could attach an arbitrary user id and push a
+       * notification into that person's personal room from a group they have never
+       * been in - and because mention:new is delivered to `user:{uid}`, the victim
+       * would see it no matter which room they were looking at.
+       *
+       * A non-member is dropped rather than failing the send: one stale id in a
+       * list (someone kicked mid-composition) should not cost the author their
+       * message. Capped at the group size limit so a single message cannot fan out
+       * arbitrarily.
+       */
+      const requested = [...new Set(input.mentions ?? [])].filter((userId) => userId !== actor).slice(0, MAX_MENTIONS);
+      const mentioned: string[] = [];
+      for (const userId of requested) {
+        if (await groups.getMembership(input.groupId, userId)) mentioned.push(userId);
+      }
+
       const outcome = await repo.send({
         groupId: input.groupId,
         senderId: actor,
         clientMsgId: input.clientMsgId,
         body: input.body,
+        mentions: mentioned,
       });
       // A deduplicated hit is not a new message: republishing it would make every
-      // receiver render the same bubble twice.
-      if (outcome.kind === 'created') await publish('message:new', outcome.message);
+      // receiver render the same bubble twice, and every mentioned person get a
+      // second notification for one sentence.
+      if (outcome.kind === 'created') {
+        await publish('message:new', outcome.message);
+        for (const userId of mentioned) {
+          await publishMention(
+            { messageId: outcome.message.id, groupId: input.groupId, fromUserId: actor },
+            userId,
+          );
+        }
+      }
       return { message: outcome.message, deduplicated: outcome.kind === 'duplicate' };
     },
 
@@ -195,6 +240,21 @@ export function createMessagesService(
         seq: message.seq,
         detail,
       });
+    },
+
+    /**
+     * GET /me/mentions（说明书 637 行）。跨群，且只读调用者自己的：没有群可 guard，
+     * 仓储查询本身按 `mentioned_user_id = 调用者` 过滤，所以不存在读到别人 @ 的路径。
+     */
+    async mentions(actor: string, query: MentionQuery): Promise<{ items: MentionDto[]; nextCursor: string | null; hasMore: boolean }> {
+      const { items, hasMore } = await repo.listMentions({
+        userId: actor,
+        unreadOnly: query.unreadOnly,
+        cursor: query.cursor ?? null,
+        limit: query.limit,
+      });
+      const last = items[items.length - 1];
+      return { items, nextCursor: hasMore && last ? last.messageId : null, hasMore };
     },
 
     async history(

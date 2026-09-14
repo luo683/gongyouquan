@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { messageEditBodySchema, messageHistoryQuerySchema, messageReceiptsQuerySchema, messageSendSchema } from '@gongyouquan/contracts';
+import { mentionQuerySchema, messageEditBodySchema, messageHistoryQuerySchema, messageReceiptsQuerySchema, messageSendSchema } from '@gongyouquan/contracts';
 import { errorEnvelope, guarded } from '../http/errors.js';
 import type { MessagesService } from './service.js';
 
@@ -59,6 +59,14 @@ export async function registerMessageRoutes(
     return guarded(request, reply, () =>
       messages.receipts(actor(request), gid, mid, parsed.data.detail === 1),
     );
+  });
+
+  app.get('/api/v1/me/mentions', { preHandler: requireAuth }, async (request, reply) => {
+    const parsed = mentionQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send(errorEnvelope(request, 'INVALID_ARGUMENT', parsed.error.flatten()));
+    }
+    return guarded(request, reply, () => messages.mentions(actor(request), parsed.data));
   });
 
   app.patch('/api/v1/messages/:mid', { preHandler: requireAuth }, async (request, reply) => {
