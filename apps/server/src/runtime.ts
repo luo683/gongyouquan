@@ -51,6 +51,13 @@ export type RuntimeOptions = {
    */
   getPresenceGroups?: (userId: string) => Promise<string[]>;
   /**
+   * Members of a set of groups, for the presence snapshot `sync:ready` carries.
+   * The presence map alone is global and knows nothing about groups, so answering
+   * "who is online here" without intersecting it with membership would leak who is
+   * connected to anybody who could name a group id.
+   */
+  getGroupMemberIds?: (groupIds: string[]) => Promise<string[]>;
+  /**
    * Spec 4.6's leak probe. The ops module that should receive this does not
    * exist yet (see decisions/0007 section four), so the default is a log line -
    * which is honest about there being nowhere better for it to go.
@@ -233,20 +240,51 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
      * Every handler answers with either the contract payload or a wsErrorPayload,
      * never a bare Error, so the client can map a code to Chinese copy instead of
      * parsing English text.
+     *
+     * The work runs whether or not an ack was supplied. It used to return early
+     * here when there was no callback, which silently discarded the entire handler
+     * - and because `follow()` lives inside these handlers, a client that forgot
+     * the callback never joined its group rooms and then received no broadcasts at
+     * all, with nothing anywhere to say why. Spec line 729 says every event except
+     * typing:* carries an ack, so this should not arise; but a failure mode that
+     * is invisible in exactly the place you would look last is not worth keeping.
      */
     async function call<T>(ack: ((value: unknown) => void) | undefined, fn: () => Promise<T>): Promise<void> {
-      if (typeof ack !== 'function') return;
       try {
-        ack(await fn());
+        const result = await fn();
+        if (typeof ack === 'function') ack(result);
       } catch (error) {
         const code = error instanceof HttpError ? error.code : 'INTERNAL_ERROR';
         if (!(error instanceof HttpError)) console.error('unhandled socket error', error);
-        ack({ error: { code, message: code.toLowerCase().replaceAll('_', ' ') } });
+        if (typeof ack === 'function') ack({ error: { code, message: code.toLowerCase().replaceAll('_', ' ') } });
       }
     }
 
     function follow(groupId: string): void {
       socket.join('group:' + groupId);
+    }
+
+    /**
+     * Who is online in these groups, for the sync:ready snapshot. The presence map
+     * is global and knows nothing about groups, so it has to be intersected with
+     * membership: answering from the map alone would tell any caller who could name
+     * a group id whether people they share no group with are connected.
+     *
+     * The caller is dropped - they know they are online, and the list is for
+     * labelling other people. A membership read that fails degrades to an empty
+     * snapshot rather than failing the handshake: presence is best effort, and
+     * refusing a reconnect over it would trade something load-bearing for
+     * something decorative.
+     */
+    async function onlineIn(groupIds: string[]): Promise<string[]> {
+      if (groupIds.length === 0 || !options.getGroupMemberIds) return [];
+      try {
+        const members = await options.getGroupMemberIds(groupIds);
+        return members.filter((memberId) => memberId !== userId && presence.online(memberId));
+      } catch (error) {
+        console.error('presence snapshot failed, answering empty', error);
+        return [];
+      }
     }
 
     socket.on('sync:hello', async (payload: unknown, ack?: (value: unknown) => void) => {
@@ -259,8 +297,9 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
           // Joining here is what makes the acknowledgement and the room list the
           // same answer: a group the caller is not in is neither reported nor joined.
           for (const group of ready.groups) follow(group.groupId);
-          socket.emit('sync:ready', ready);
-          return ready;
+          const withPresence = { ...ready, online: await onlineIn(ready.groups.map((group) => group.groupId)) };
+          socket.emit('sync:ready', withPresence);
+          return withPresence;
         }
 
         const authorized: Array<{ groupId: string; lastSeq: number }> = [];
@@ -271,7 +310,11 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
             follow(group.groupId);
           }
         }
-        const ready = { groups: authorized, contractVersion: options.contractVersion ?? 'unversioned' };
+        const ready = {
+          groups: authorized,
+          contractVersion: options.contractVersion ?? 'unversioned',
+          online: await onlineIn(authorized.map((group) => group.groupId)),
+        };
         socket.emit('sync:ready', ready);
         return ready;
       });

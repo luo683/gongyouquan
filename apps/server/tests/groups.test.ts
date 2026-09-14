@@ -76,6 +76,16 @@ class MemoryGroupsRepository implements GroupsRepository {
       .map((m) => ({ userId: m.userId, username: m.userId, displayName: m.userId, role: m.role, joinedAt: '2026-09-13T12:00:00+08:00' }));
   }
 
+  async memberUserIds(groupIds: string[]): Promise<string[]> {
+    const seen = new Set<string>();
+    for (const groupId of groupIds) {
+      for (const member of this.memberships.get(groupId) ?? []) {
+        if (!member.removed) seen.add(member.userId);
+      }
+    }
+    return [...seen];
+  }
+
   async updateGroup(groupId: string, input: { name?: string; description?: string | null }) {
     const group = this.groups.find((item) => item.id === groupId);
     if (!group) return null;

@@ -73,3 +73,5 @@ select { padding: .4rem; border: 1px solid #d4d6db; border-radius: 7px; font: in
 .readers { color: #6b6b73; font-size: .7rem; }
 /* Inside the muted footer, so a little colour is what makes it noticeable at all. */
 .typing { color: #2f6feb; margin-right: .5rem; }
+.tag.on { color: #188038; border-color: #b7dfc3; }
+.version { margin: .6rem 0 0; font-size: .7rem; opacity: .7; }

@@ -252,6 +252,16 @@ export type SyncHello = z.infer<typeof syncHelloSchema>;
 export const syncReadySchema = z.object({
   groups: z.array(z.object({ groupId: entityIdSchema, lastSeq: z.number().int().nonnegative() })),
   contractVersion: z.string().min(1),
+  /**
+   * 已经在线的人（限调用者真正在的那些群）。
+   *
+   * 没有这份快照，客户端只能靠 `presence:updated` 的增量去认识在线状态——刷新之后
+   * 它要等到某人下次上下线才知道对方在不在，在那之前任何在线标记都是恒假的「全员
+   * 离线」。恒为假的指示器比没有指示器更糟，所以补在这里：`sync:hello` 本来就是
+   * 连接后第一件事，客户端也本来就在等这个回答，不额外多一次往返。
+   * `decisions/0009` 第二节的选项 A。刻意设为必填，让每个生产方都得明确回答。
+   */
+  online: z.array(entityIdSchema),
 });
 export type SyncReady = z.infer<typeof syncReadySchema>;
 

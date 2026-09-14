@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GroupSummaryDto, InviteDto, MemberDto, MessageDto, MessageReceiptsDto, ReadUpdatedEvent, TypingEvent } from '@gongyouquan/contracts';
+import type { GroupSummaryDto, InviteDto, MemberDto, MessageDto, MessageReceiptsDto, PresenceUpdatedEvent, ReadUpdatedEvent, TypingEvent } from '@gongyouquan/contracts';
+import { syncReadySchema } from '@gongyouquan/contracts';
 import { io, type Socket } from 'socket.io-client';
 import { api, ApiError, clearSession, hasSession, setSession, type Tokens } from './api.js';
 import { copyFor, retryAfterSeconds, roleLabel, stateLabel } from './copy.js';
@@ -79,6 +80,27 @@ export function App() {
   const typingTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const typingIdle = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTypingStart = useRef(0);
+  /**
+   * Who is connected. Seeded from the sync:ready snapshot and then kept current by
+   * presence:updated. A ref mirror as well, because the socket handlers are
+   * registered once and would otherwise read the set as it was at mount.
+   */
+  const [onlineUsers, setOnlineUsers] = useState<Record<string, true>>({});
+  const onlineRef = useRef<Record<string, true>>({});
+  /**
+   * What the server says its contracts hash is. Recorded and shown rather than
+   * compared: the client has no build-time hash to compare it against yet, which
+   * is §5 item 7 of the handover. Storing it is the precondition for the guard spec
+   * §7 asks for, and inventing a fake constant to compare against would be worse
+   * than no guard at all.
+   */
+  const [contractVersion, setContractVersion] = useState<string | null>(null);
+  /**
+   * Mirrors groupList for the connect handler. A reconnect has to report the
+   * groups the user is in *now*, not the ones captured when they signed in, or a
+   * group joined mid-session would never be hello'd and so never pushed to.
+   */
+  const groupListRef = useRef<GroupSummaryDto[]>([]);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<Socket | null>(null);
   const statesRef = useRef<Record<string, GroupState>>({});
@@ -107,7 +129,9 @@ export function App() {
 
   const refreshGroups = useCallback(async () => {
     try {
-      setGroupList(await api.groups());
+      const list = await api.groups();
+      groupListRef.current = list;
+      setGroupList(list);
     } catch (error) {
       setNotice(error instanceof ApiError ? error.message : '群列表拉取失败');
     }
@@ -121,7 +145,31 @@ export function App() {
     (accessTokenValue: string) => {
       const socket = io('/', { auth: { token: accessTokenValue }, transports: ['websocket'] });
       socketRef.current = socket;
-      socket.on('connect', () => setConnected(true));
+      socket.on('connect', () => {
+        setConnected(true);
+        /**
+         * 4.3.2: hello is the first thing after connecting. It is what makes the
+         * server answer with the groups the caller is still in, what joins the
+         * socket to those rooms, and what carries the contractVersion back. The
+         * client never sent it before, so sync:ready was dead code and every
+         * broadcast depended on a room join that only happened as a side effect of
+         * opening a room. decisions/0009 section three.
+         */
+        socket.emit(
+          'sync:hello',
+          {
+            groups: groupListRef.current.map((group) => ({
+              groupId: group.id,
+              syncedSeq: statesRef.current[group.id]?.syncedSeq ?? 0,
+            })),
+          },
+          // The ack and sync:ready carry the same payload. Handling it here too
+          // would apply every watermark twice, so the ack only surfaces a refusal.
+          (response: { error?: { code: string } }) => {
+            if (response?.error) setNotice(copyFor(response.error.code));
+          },
+        );
+      });
       socket.on('disconnect', () => setConnected(false));
 
       socket.on('message:new', (message: MessageDto) => {
@@ -157,11 +205,29 @@ export function App() {
         if (event.groupId !== selectedRef.current) return;
         clearTyping(event.userId);
       });
-      socket.on('sync:ready', (ready: { groups: Array<{ groupId: string; lastSeq: number }> }) => {
+      socket.on('sync:ready', (payload: unknown) => {
+        const parsed = syncReadySchema.safeParse(payload);
+        if (!parsed.success) {
+          setNotice('服务端握手应答无法解析，请刷新重试');
+          return;
+        }
+        const ready = parsed.data;
+        setContractVersion(ready.contractVersion);
+        // The snapshot is the only way to know who was already online before this
+        // connection existed; presence:updated from here on is incremental.
+        onlineRef.current = Object.fromEntries(ready.online.map((userId) => [userId, true as const]));
+        setOnlineUsers(onlineRef.current);
         for (const group of ready.groups) {
           const local = statesRef.current[group.groupId] ?? emptyGroup(0);
           if (group.lastSeq > local.syncedSeq) void pull(socket, group.groupId, local.syncedSeq, commit);
         }
+      });
+      socket.on('presence:updated', (event: PresenceUpdatedEvent) => {
+        const next = { ...onlineRef.current };
+        if (event.online) next[event.userId] = true;
+        else delete next[event.userId];
+        onlineRef.current = next;
+        setOnlineUsers(next);
       });
     },
     [commit],
@@ -715,6 +781,14 @@ export function App() {
           {groupList.length === 0 ? <li className="empty">你还没有加入任何群。请群主或管理员给你邀请码。</li> : null}
         </ul>
         {notice ? <p className="warn" role="status">{notice}</p> : null}
+        {/*
+          Recorded, not compared: the client has no build-time contracts hash to
+          compare against yet (handover §5 item 7), so spec §7's guard cannot run.
+          Showing the server's value is what makes a mismatch discoverable instead
+          of invisible; inventing a constant to diff against would only look like a
+          guard while never failing.
+        */}
+        {contractVersion ? <p className="sub version">契约版本 {contractVersion}</p> : null}
       </aside>
 
       <section className="room">
@@ -864,6 +938,10 @@ export function App() {
                     {member.displayName}
                     {isSelf ? <em className="tag">我</em> : null}
                     <em className="tag role">{roleLabel(member.role)}</em>
+                    {/* Seeded from the sync:ready snapshot and kept current by
+                        presence:updated, so this is right straight after a reload
+                        rather than only for people who happen to reconnect. */}
+                    {onlineUsers[member.userId] ? <em className="tag on">在线</em> : null}
                   </span>
                   <span className="acts">
                     {canManage(member) ? (

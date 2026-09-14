@@ -35,6 +35,8 @@ export type GroupsRepository = GroupAccess & {
   getGroup(groupId: string): Promise<GroupRecord | null>;
   getMembership(groupId: string, userId: string): Promise<GroupMembership | null>;
   listMembers(groupId: string): Promise<GroupMemberRecord[]>;
+  /** Every current member of any of these groups, deduplicated. Feeds the presence snapshot. */
+  memberUserIds(groupIds: string[]): Promise<string[]>;
   updateGroup(groupId: string, input: { name?: string; description?: string | null }): Promise<GroupRecord | null>;
 };
 

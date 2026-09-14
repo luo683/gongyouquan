@@ -94,8 +94,23 @@ describe('sync contracts', () => {
     expect(syncReadySchema.parse({
       groups: [{ groupId: '12', lastSeq: 106 }],
       contractVersion: 'a1b2c3d4',
+      online: [],
     }).contractVersion).toBe('a1b2c3d4');
     expect(() => syncReadySchema.parse({ groups: [] })).toThrow();
+  });
+
+  it('requires the presence snapshot, because an omitted one reads as everybody offline', () => {
+    expect(syncReadySchema.parse({
+      groups: [{ groupId: '12', lastSeq: 106 }],
+      contractVersion: 'a1b2c3d4',
+      online: ['77', '78'],
+    }).online).toEqual(['77', '78']);
+    // Empty is a valid answer - nobody is online. Missing is not: it would leave a
+    // client that cannot tell "no one" from "the server did not say", and the
+    // second of those renders every dot as offline. decisions/0009 section two.
+    expect(() =>
+      syncReadySchema.parse({ groups: [], contractVersion: 'a1b2c3d4' }),
+    ).toThrow();
   });
 
   it('caps a pull page at the 200 the spec fixes', () => {

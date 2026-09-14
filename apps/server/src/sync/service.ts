@@ -15,6 +15,15 @@ export type SyncServiceOptions = {
   contractVersion: string;
 };
 
+/**
+ * What hello can answer on its own: watermarks and the contract version. The
+ * presence snapshot the full `SyncReady` requires is the runtime's to add, because
+ * the runtime owns the in-process presence map and this service owns nothing but
+ * the database. Making hello return a whole SyncReady would force it to know
+ * about sockets.
+ */
+export type SyncHelloAnswer = Omit<SyncReady, 'online'>;
+
 export function createSyncService(options: SyncServiceOptions) {
   const { repo, contractVersion } = options;
 
@@ -31,7 +40,7 @@ export function createSyncService(options: SyncServiceOptions) {
      * from becoming an oracle for group existence, and it is also what makes the
      * socket join the right rooms.
      */
-    async hello(actor: string, hello: SyncHello): Promise<SyncReady> {
+    async hello(actor: string, hello: SyncHello): Promise<SyncHelloAnswer> {
       const ids = hello.groups.map((group) => group.groupId);
       const found = await repo.watermarks(actor, ids);
       return {

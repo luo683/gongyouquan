@@ -85,7 +85,11 @@ describe('server runtime', () => {
     clients.push(client);
 
     await onceSocket<void>(client, 'connect');
-    const ready = onceSocket<{ groups: Array<{ groupId: string; lastSeq: number }>; contractVersion: string }>(client, 'sync:ready');
+    const ready = onceSocket<{
+      groups: Array<{ groupId: string; lastSeq: number }>;
+      contractVersion: string;
+      online: string[];
+    }>(client, 'sync:ready');
     const ack = new Promise<unknown>((resolve) => {
       client.emit('sync:hello', { groups: [
         { groupId: 'group-1', syncedSeq: 0 },
@@ -97,6 +101,9 @@ describe('server runtime', () => {
     expect(readyPayload).toEqual({
       groups: [{ groupId: 'group-1', lastSeq: 12 }],
       contractVersion: 'test-contract',
+      // No group-member resolver on this runtime, so the snapshot degrades to
+      // empty rather than to undefined and a schema failure on the client.
+      online: [],
     });
     expect(await ack).toEqual(readyPayload);
     expect(client.connected).toBe(true);
@@ -199,5 +206,51 @@ describe('server runtime', () => {
     expect(events.filter((event) => !event.online)).toEqual([
       { groupId: 'group-1', userId: 'user-1', online: false, at: expect.any(String) },
     ]);
+  });
+
+  it('hands a fresh connection the online snapshot it cannot infer from events', async () => {
+    // user-3 is a member the resolver knows about but who never connects, and
+    // user-1 connects. The snapshot has to be the intersection, not the whole
+    // presence map and not the whole member list.
+    const { url } = await startRuntime({ getGroupMemberIds: async () => ['user-1', 'user-2', 'user-3'] });
+
+    const first = await connect(url, 'user-1');
+    const firstReady = onceSocket<{ online: string[] }>(first, 'sync:ready');
+    await new Promise<unknown>((resolve) => {
+      first.emit('sync:hello', { groups: [{ groupId: 'group-1', syncedSeq: 0 }] }, resolve);
+    });
+    // Nobody else is connected yet, and the caller is never in their own snapshot.
+    expect((await firstReady).online).toEqual([]);
+
+    const second = await connect(url, 'user-2');
+    const secondReady = onceSocket<{ online: string[] }>(second, 'sync:ready');
+    second.emit('sync:hello', { groups: [{ groupId: 'group-1', syncedSeq: 0 }] });
+    /**
+     * This is the case the snapshot exists for: without it user-2 would have to
+     * wait for user-1 to reconnect before learning they were there, and every dot
+     * in the UI would read offline after a page reload.
+     */
+    expect((await secondReady).online).toEqual(['user-1']);
+  });
+
+  it('still runs a handler whose client forgot the ack callback', async () => {
+    const { url } = await startRuntime();
+    const deaf = await connect(url, 'user-1');
+    // No ack function. This used to make the server skip the handler entirely, so
+    // the socket never joined its room and then heard nothing at all - no error, no
+    // ack, no broadcast, and nothing in the logs to point at the missing callback.
+    deaf.emit('sync:hello', { groups: [{ groupId: 'group-1', syncedSeq: 0 }] });
+    await settle();
+
+    const heard = record<{ groupId: string; userId: string }>(deaf, 'typing:start');
+    const peer = await connect(url, 'user-2');
+    await joinRoom(peer);
+
+    // A typing relay only reaches sockets inside group:group-1, so hearing it is
+    // proof the ackless sync:hello above really did run and really did join.
+    peer.emit('typing:start', { groupId: 'group-1' });
+    await settle();
+
+    expect(heard).toEqual([{ groupId: 'group-1', userId: 'user-2' }]);
   });
 });

@@ -137,6 +137,23 @@ export function createGroupsRepository(database: QueryClient): GroupsRepository 
       })) satisfies GroupMemberRecord[];
     },
 
+    async memberUserIds(groupIds) {
+      if (groupIds.length === 0) return [];
+      /**
+       * One round trip for the whole set. listMembers is per group and carries
+       * display names this caller never reads, so looping it would be N queries
+       * to produce a list of ids. DISTINCT because one person in two of the
+       * reported groups is still one person online.
+       */
+      const result = await database.query<Row>(
+        `SELECT DISTINCT gm.user_id
+           FROM group_members gm
+          WHERE gm.group_id = ANY($1::bigint[]) AND gm.removed_at IS NULL`,
+        [groupIds],
+      );
+      return result.rows.map((row) => String(row.user_id));
+    },
+
     async updateGroup(groupId, input) {
       if (input.name === undefined && input.description === undefined) {
         return this.getGroup(groupId);

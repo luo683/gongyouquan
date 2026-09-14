@@ -65,6 +65,8 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
      * are included: they stay readable and their members still see them.
      */
     getPresenceGroups: async (userId) => (await groupsRepo.listGroups(userId, true)).map((group) => group.id),
+    /** Membership for the sync:ready presence snapshot; the presence map itself is process memory. */
+    getGroupMemberIds: (groupIds) => groupsRepo.memberUserIds(groupIds),
     members: createMembersService(createMembersRepository(database), groupsRepo),
     // One shared bus: the write path publishes here after COMMIT and buildApp
     // attaches the Socket.IO emitter to it, so nothing in src/messages needs to
