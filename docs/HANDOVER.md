@@ -2,14 +2,14 @@
 
 - 编写日期：2026-09-14（运维闭环那一段之后更新；上一版重写于同日，替换 2026-09-13 那份被 mojibake 损坏且已过期的版本）
 - 适用仓库：`E:\工友圈`（远端 `git@github.com:luo683/gongyouquan.git`）
-- 交接起点：`feat/contracts-foundation` 分支，`HEAD = 4d1eda1`，工作区干净
+- 交接起点：`feat/contracts-foundation` 分支，`HEAD = 5dd2822`，工作区干净
 - 设计真源：`docs/specs/` 下三份说明书（**不要改原文**，矛盾与缺口走 `docs/decisions/`）
 
 ---
 
 ## 1. 一句话现状
 
-后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；**已读回执、typing、presence（含在线快照）、@提及四条都已两侧打通**；`sync:hello` 已接通，服务端 `contractVersion` 现在真的会到浏览器；浏览器端（React + Vite）可真聊、未读徽标会消、成员管理可逐条点通、能 @ 人并收到「@我」列表。运维闭环起步：`/internal/metrics` 已按「只报能真实测到的」实现，`infra/backup/` 三个脚本已写，且**恢复演练不是文档而是真跑过一次并通过**（含两次故意失败的负向验证）。部署栈的密钥已改成必填插值，缺任何一个 `docker compose config` 直接拒绝解析（见 `decisions/0012`）。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 四个整块未动的模块、Electron 外壳、备份容器镜像与 compose 接线、systemd / `opsctl` / 告警落点，**数据库与核心收发链路不再是阻塞项**。
+后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；**已读回执、typing、presence（含在线快照）、@提及四条都已两侧打通**；`sync:hello` 已接通，服务端 `contractVersion` 现在真的会到浏览器；浏览器端（React + Vite）可真聊、未读徽标会消、成员管理可逐条点通、能 @ 人并收到「@我」列表。运维闭环起步：`/internal/metrics` 已按「只报能真实测到的」实现；`infra/backup/` 四个脚本 + `Dockerfile` 已在 compose 里接成 `backup` 服务，由 supercronic 调度、`backup-health.sh` 做新鲜度探活；**恢复演练不是文档而是真跑过**——本轮跑的是「容器自己 dump 出来的那份」，七道检查全绿，外加三条各自以 1 退出的负向用例。部署栈的密钥已改成必填插值，缺任何一个 `docker compose config` 直接拒绝解析（见 `decisions/0012`）；备份容器与手册之间的三处出入登记在 `decisions/0013`。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 四个整块未动的模块、Electron 外壳、systemd / `opsctl` / 告警落点，**数据库与核心收发链路、以及「有没有备份」这一条不再是阻塞项**。
 
 ---
 
@@ -18,14 +18,14 @@
 | 项 | 值 |
 |---|---|
 | 默认分支 | `main`（停在基线 `a322610`，尚未合并任何开发提交） |
-| 开发分支 | `feat/contracts-foundation`，**领先 `main` 51 个提交**（本文档自身的更新紧随其后，单独一个 docs 提交） |
-| 当前 HEAD | `4d1eda1 feat(infra): backup scripts, with the restore drill run against a real dump` |
+| 开发分支 | `feat/contracts-foundation`，**领先 `main` 56 个提交**（本文档自身的更新紧随其后，单独一个 docs 提交） |
+| 当前 HEAD | `5dd2822 feat(backup): the backup container, with the drill run against a restored database` |
 | 标签 | `m0-foundation` → `a322610`（仓库基线） |
 | 远端 | `origin` = `git@github.com:luo683/gongyouquan.git`，SSH，账号 `luo683` |
 | Git 身份 | `user.name=luo683`，`user.email=3012390263@qq.com` |
 | 提交约定 | `type(scope): summary`；一次提交只做一件可验证的事；不使用 `--force` |
 
-基线之后 51 个提交（旧→新，最后四个是本轮补的）：
+基线之后 56 个提交（旧→新，最后五个是本轮补的）：
 
 ```text
 3464abd feat(contracts): add shared transport schemas
@@ -55,6 +55,7 @@ bd1f69e test(server): two real clients chat over a real database
 9d4953e docs: bring the handover and README up to the sync module
 3422e91 feat(http): token bucket limiter with an injectable clock
 71d749f feat(server): enforce the spec 8.2 limits and add logout-all
+7557df0 test(server): cover logout-all and a refresh storm against the real database
 6331c70 docs: record the rate limiting trade-offs and a bug the gate missed
 08f5a71 feat(web): a browser client that actually talks to the backend
 0276ecb docs: record that the browser client now exists
@@ -78,6 +79,11 @@ a533923 feat: wire the sync:hello handshake and put a presence snapshot in it
 2237856 feat(server): /internal/metrics, reporting only what can be measured
 8f7aa11 docs: register what /internal/metrics deliberately does not report
 4d1eda1 feat(infra): backup scripts, with the restore drill run against a real dump
+314d098 docs: put the real health-check intervals in the metrics decision
+0d152f9 docs: bring the handover up to the ops loop, including what the drill proved
+2af1026 feat(deploy): secrets become required, so the stack cannot boot on a committed value
+60d7455 docs: register that the manual's secret recipe cannot produce a usable DATABASE_URL
+5dd2822 feat(backup): the backup container, with the drill run against a restored database
 ```
 
 ---
@@ -105,7 +111,7 @@ a533923 feat: wire the sync:hello handshake and put a presence snapshot in it
 ├── infra/deploy/           docker-compose.yml + Caddyfile + 两个 Dockerfile + .env.example + gen-secrets.sh
 ├── infra/backup/           Dockerfile + backup-once.sh / backup-loop.sh / restore-drill.sh / backup-health.sh
 ├── docs/specs/             三份说明书原件（01-后端 / 02-前端 / 03-AI运维）
-├── docs/decisions/         矛盾与缺口登记（0001-0012）
+├── docs/decisions/         矛盾与缺口登记（0001-0013）
 ├── eslint.config.js        根级 ESLint（flat config），lint 现已是真实闸门
 └── .github/workflows/      CI（见 §7）
 ```
@@ -189,7 +195,7 @@ GET    /internal/metrics
 
 ### 部署 `infra/deploy`
 
-- **密钥全部必填，仓库里一个口令都没有了**。起法：`cp infra/deploy/.env.example infra/deploy/.env` → `infra/deploy/gen-secrets.sh` → `docker compose -f infra/deploy/docker-compose.yml up -d --build`。compose 里五个密钥（`POSTGRES_USER/DB` 与 `POSTGRES_PASSWORD` / `JWT_SECRET` / `MEILI_MASTER_KEY` / `ALERT_HMAC_SECRET` / `RESTIC_PASSWORD`）都是 `${VAR:?…}`，缺任何一个 `docker compose config` **拒绝解析**（实测：`error while interpolating services.db.environment.POSTGRES_PASSWORD: required variable POSTGRES_PASSWORD is missing a value`）。`:?` 对**空值同样报错**，所以 `.env.example` 里那五把钥匙是留空的——复制了没生成就必然起不来
+- **密钥全部必填，仓库里一个口令都没有了**。起法：`cp infra/deploy/.env.example infra/deploy/.env` → `infra/deploy/gen-secrets.sh` → `docker compose -f infra/deploy/docker-compose.yml up -d --build`（**这台机器上 `--build` 不可用**，见 §11 坑 25；本机验证过的一键块在 §9 本节末）。栈现在是四个服务：`db` / `server` / `web` / `backup`。compose 里五个密钥（`POSTGRES_USER/DB` 与 `POSTGRES_PASSWORD` / `JWT_SECRET` / `MEILI_MASTER_KEY` / `ALERT_HMAC_SECRET` / `RESTIC_PASSWORD`）都是 `${VAR:?…}`，缺任何一个 `docker compose config` **拒绝解析**（实测：`error while interpolating services.db.environment.POSTGRES_PASSWORD: required variable POSTGRES_PASSWORD is missing a value`）。`:?` 对**空值同样报错**，所以 `.env.example` 里那五把钥匙是留空的——复制了没生成就必然起不来
 - `gen-secrets.sh` 逐把校验字符集与长度、数一遍五把确实互不相同、**拒绝覆盖已存在的 `.env`**。为什么是脚本不是一段说明：见 `decisions/0012` 第五节
 - **整套栈在注入的密钥下真跑通过**（2026-09-14）：`/readyz` healthy（就绪判定要求真连上库，所以这条同时证明了插值出来的 `DATABASE_URL` 能用）、`create-admin` 建号并自校验登录、`POST /auth/login` 出 token、带 token 的 `GET /groups` 返回系统群、不带 token 401。**旧的 `db/01-set-password.sql` 已删除**（它声称的理由在当前镜像上复现不出来，而它实际做的事是把凭据写进仓库；见 `decisions/0012` 第三节）
 - **换密钥对已有数据卷无效**——`POSTGRES_PASSWORD` 只在空数据目录时被应用一次。本机默认项目那个已有卷已按 `ALTER USER` 轮换（容器内 psql 走 localhost trust 行，所以不需要旧密码），换完 `up -d` 全绿；**别的项目/机器上重做这件事时，直接 `up` 会得到一个 28P01 且报错不提「卷是旧的」**
@@ -199,20 +205,38 @@ GET    /internal/metrics
 ### 运维闭环 `infra/backup`（手册 8.1-8.3）
 
 - **`backup-once.sh`** —— 手册 8.2 的实现：`nice -n 19 pg_dump -Fc -Z6` + `pg_dumpall --globals-only | gzip`，然后**必须** `pg_restore --list` 通过且 TOC 条目数 > 0 才算成功（「只生成文件不算备份」）。`.env` 只在有 age 公钥时加密带走，**否则跳过而不是明文落盘**。异地未配置时**直接失败退出**，除非显式 `ALLOW_LOCAL_ONLY=1`——一个只会写本地的脚本在服务器报废那天等于没有备份。成功后写 `last_success.json`（巡检项 20 读它的 mtime，项 21 读它指向的 dump），本地暂存留 3 天
-- **`restore-drill.sh`** —— 手册 8.3 的实现，**刻意写成 POSIX sh**：stock `postgres:17-alpine` 里有 psql / pg_restore / createdb 但**没有 bash**，而这个脚本最自然的执行位置就是那个临时容器内部。七道检查，**退出码就是结论**（不打印一堆数字让人自己判断）：dump 可读性（放在恢复**之前**，恢复一个坏 dump 会得到半个数据库，那比恢复失败更难发现）、核心表可查、行数下限、最新 10 条正文非空（截断的 dump 会在最早的消息处断）、引用完整性（悬挂 attachments / mentions / memberships）、`schema_migrations` 非空（否则恢复出来的库启动时会重跑迁移、可能与已恢复的结构冲突）、`alloc_group_seq` 可调用。**只有后两项里的 `alloc_group_seq` 与全局对象恢复是警告而非致命**——前者可能只是因为库里没有群，后者在 `--no-owner` 路径上本来就不被依赖。目标库已存在则**拒绝执行**——对着有数据的库演练分不清哪些行是恢复出来的
-- **`backup-loop.sh`** —— backup 容器的 entrypoint：crontab 由 `BACKUP_HOUR`/`BACKUP_MINUTE` 生成而不是写死在镜像里（改时间不该重建镜像）；启动时先自检 `pg_dump / pg_restore / restic / age`（缺 pg 客户端直接 fatal，因为没它这个容器毫无意义）；若 `last_success.json` 已超过 26 小时则**立即补跑**——容器可能正好在 03:00 不在运行，而「等明天那一班」意味着那一整天没有任何副本
+- **`restore-drill.sh`** —— 手册 8.3 的实现，**刻意写成 POSIX sh**：stock `postgres:17-alpine` 里有 psql / pg_restore / createdb 但**没有 bash**，而这个脚本最自然的执行位置就是那个临时容器内部。七道检查，**退出码就是结论**（不打印一堆数字让人自己判断）：dump 可读性（放在恢复**之前**，恢复一个坏 dump 会得到半个数据库，那比恢复失败更难发现）、核心表可查、行数下限、最新 10 条**文本**消息正文非空、引用完整性（悬挂 attachments / mentions / memberships）、`schema_migrations` 非空（否则恢复出来的库启动时会重跑迁移、可能与已恢复的结构冲突）、`alloc_group_seq` 可调用。**七道全部是致命的**，只有全局对象恢复是警告——它在 `--no-owner` 路径上本来就不被依赖。目标库已存在则**拒绝执行**——对着有数据的库演练分不清哪些行是恢复出来的。`pg_restore` 的输出不再丢进 `/dev/null`：失败时打末尾 25 行，因为这个脚本最常见的执行场景是「服务器已经没了，对着异地副本试一次」，那时报错文本是唯一线索
+  - **本轮修掉的两处**：3.3 原先把「正文为空」当截断证据，但 `messages.body` 在 `0001_init.sql:150` 就是可空的（`image / file / system / task_card` 没有正文）——**第一张图片就会把演练判成失败**，而一个总是指控错了的演练下次真出事时没人当真；现在限定 `kind = 'text' AND deleted_at IS NULL`。3.6 原先失败时打一行「需人工确认」却**仍无条件 ok**——没有人在读那行警告，退出码才是结论
+- **`backup-loop.sh`** —— backup 容器的 entrypoint：crontab 由 `BACKUP_HOUR`/`BACKUP_MINUTE` 生成而不是写死在镜像里（改时间不该重建镜像）；启动时先自检 `pg_dump / pg_restore / restic / age`（缺 pg 客户端直接 fatal，因为没它这个容器毫无意义；**restic 用 `restic version` 子命令而不是 `--version`**，统一拼法会打出 `unknown flag: --version`，让这份「工具链到底在不在」的证据日志长得像装坏了）；若 `last_success.json` 已超过 26 小时则**立即补跑**——容器可能正好在 03:00 不在运行，而「等明天那一班」意味着那一整天没有任何副本。实测启动输出：`pg_dump (PostgreSQL) 17.11` / `pg_restore 17.11` / `restic 0.18.1` / `age v1.3.1`
+- **`Dockerfile`** —— 基座是 `postgres:17-alpine` 而不是「node 镜像 + postgresql-client」，理由就是手册 8.2 那句 `pg_dump` 大版本必须与服务器一致：跟着服务器同一个 tag 走，对齐是结构性的而不是需要提醒的。四个 apk 包各有独立理由（`bash` 因为 `set -euo pipefail` 的 pipefail 对 `pg_dumpall | gzip` 是承重的；`age` 缺了会让 `.env` 静默不进备份；`supercronic` 取 apk 包而非 `curl|sh` 拉 GitHub 二进制）。镜像 424MB → 522MB。**注意 `ENTRYPOINT` 已占用**：`docker run IMAGE sh -c '…'` 会把 `sh -c …` 当成**参数交给 backup-loop.sh**，于是它开始跑调度并永不退出；一次性命令必须 `--entrypoint sh`（本轮踩过，卡了 120 秒）
+- **compose 里的 `backup` 服务**（`infra/deploy/docker-compose.yml`）—— `depends_on: db: service_healthy`，挂 `uploads:ro` + `backups` 卷 + `./.env:/opt/chat/.env:ro` + `./age:/etc/age:ro`，`no-new-privileges`。**`mem_limit: 256m` 是对手册 2.4 那个 100m 的刻意偏离**（超出部分正是 `pg_dump -Z6` 的压缩缓冲与 restic 的上传，而被 cgroup 无预警杀掉的是备份——下一个需要恢复的人只会发现副本停在三天前）；上线前按真实数据量重测。**这里有个第一轮没发现的洞**：`AGE_RECIPIENT_FILE=/etc/age/recipient.pub` 写好了却什么都没挂，于是公钥永远不存在、`.env` 永远不会被备份，而手册 4.3 说这是后果最严重的一项。改成挂**目录**而不是挂文件，是为了避开「bind mount 一个不存在的文件时 Docker 会在目标处造出空目录」那个坑（同文件 `.env` 那行的注释里已经记过一次）
+- **`backup-health.sh`** —— 巡检项 20 在这个栈里的落点。`backup-once.sh` 失败时本该调 `notify-alert.sh`，而那个脚本属于还没开始的 `ops` 模块，所以**此刻没有任何东西会因为有备份失败而说话**；挂成 Docker healthcheck，`docker compose ps` 就会显出红色。阈值 26h（与 `backup-loop.sh` 的补跑阈值同源）。输出顺带报出 `last_success.json` 里的异地模式（`ok：上次备份 0 小时前，异地=local-only`）——**但 local-only 不判为失败**：还没配 restic 的装机第一天会拿到一个永久红色的容器，而一个总是红的灯没有人读。让它可见，不让它失败
+  - **变红这件事单独验过**（因为整条运维闭环现在的唯一信号就是它）：清空 `/backups` 之后 `docker inspect` 的健康日志依次记 `ExitCode 0` → `1` → `1`，输出是那行「没有任何成功备份…」。`interval: 10m` × `retries: 3`，所以**状态翻转最多要 30 分钟**，不是立刻
+  - **两类失败的最坏发现时延不一样**，这决定了这个探针值多少：`last_success.json` 整个不见了（卷被清、被误删）→ 下一次探针就报 1，**≤10 分钟**；备份每晚都失败但**昨天那份 marker 还在**→ 只有等它过期，也就是 **26 小时 + 至多 10 分钟**才发现。第二种才是 `backup-once.sh` 常规失败的样子，所以这个探针真正承诺的是「**一天之内一定有人看见**」，不是「当晚就知道」。`notify-alert.sh` 落进 `ops` 模块之后该由它去补第一种之外的空档
 
-**演练已经真跑过，不是文档**。对开发库 `gyq_dev` 做 `pg_dump -Fc -Z6`（79,418 字节 / 205 个 TOC 对象），起一个临时 `postgres:17-alpine` 容器、`docker cp` 进 dump 与脚本、在容器里 `sh /tmp/restore-drill.sh`：
+**演练已经真跑过，不是文档**。本轮跑的是**容器自己产出的那一份**（上一轮跑的是手工对 `gyq_dev` dump 出来的），这样演练覆盖的才是真实链路而不是它的近似：先在栈里种下真数据（`create-admin` 建 `drillboss` + 邀请码注册 `drillmate` + 三条消息 + 一次 @ 人 + 一次相同 `clientMsgId` 的重发），再由 `backup-once.sh` dump，再灌进一个一次性 `postgres:17-alpine`：
 
 ```text
-PASS，exit 0：恢复 1s；users=3 groups=3 members=4 messages=3 mentions=1；
-无悬挂引用；schema_migrations=2（所以恢复出来的库可以直接启动）；
-alloc_group_seq 可调用；pg_restore (PostgreSQL) 17.11
+PASS，exit 0：恢复 0s / 演练总 1s；TOC 202 个对象；dump 78,735 字节
+用户=4 群=4 成员=6 消息=3 提及=1；核心表齐全；无悬挂引用；
+schema_migrations=2（所以恢复出来的库可以直接启动）；alloc_group_seq 可调用；
+pg_restore (PostgreSQL) 17.11；角色 gongyouquan 经 globals_*.sql.gz 真的落到了目标集群
+（那条单独验过，因为 `--no-owner` 路径平时并不需要它，坏了也不会被人看见）
 ```
 
-负向验证也做了两次，因为**能报成功的脚本不等于能发现失败的脚本**：把行数期望改成 `EXPECT_MIN_MESSAGES=999` → `FAIL: 消息数 3 少于期望的 999 —— 恢复不完整`，exit 1；把 dump 截断到 4000 字节 → `FAIL: dump 不可读，演练终止`，exit 1，且**在第一道闸门就停下、根本没尝试恢复**。
+顺带看到的一件事（**注意它的边界**）：重发同一个 `clientMsgId` 是在**活栈上**做的，返回 `200` 且 `id` 仍是 `1`，没有产生第四行；因此 dump 里就是 3 条，恢复出来的副本也查到 3 条。**这不是「在恢复出来的库上重演了一次幂等」**——那一件事没测，也就是 `messages_client_msg_key`（`0001_init.sql:161`，一个带 `WHERE client_msg_id IS NOT NULL` 的**部分**唯一索引）在恢复后是否仍然拒绝重复插入，本轮没有证据。要测的话很简单：往 `chat_drill`（`KEEP_DB=1`）里用同一个 `(sender_id, client_msg_id)` 插两次，第二次应该以 `23505`（唯一约束）失败，而不是安静地多出第二行。
 
-**还缺的**：备份容器镜像（`postgres:17-alpine` 基 + restic + age + supercronic）与 `infra/deploy/docker-compose.yml` 里的 `backup` 服务接线。在那之前 `backup-once.sh` / `backup-loop.sh` 不会被任何东西调度——脚本进了仓库但还没有人跑它。
+负向验证本轮做了**三条**，因为**能报成功的脚本不等于能发现失败的脚本**：
+
+| 负向用例 | 结果 |
+|---|---|
+| `ALLOW_LOCAL_ONLY=0` 且没有 restic | `FATAL: 未配置 RESTIC_REPOSITORY…`，exit 1 |
+| dump 截断到 3000 字节 | `FAIL: dump 不可读，演练终止`，exit 1，**在第 0 道闸门就停下、根本没尝试恢复**（上一轮用 4000 字节做过一次，本轮换 3000 重做以确保仍然咬得住） |
+| `/backups` 清空后跑 healthcheck | `没有任何成功备份：…不存在`，exit 1 |
+
+另外 `GLOBALS_FILE` 指向一个不存在的文件时是 `FAIL` 而不是跳过——这条是撞出来的，不是我设计的：那次 `docker cp` 因为 §11 坑 21 没把文件送进去，脚本拒绝了而不是默默继续，这正是应有行为。
+
+**还缺的**：**一把 age 私钥的存放**（本轮把公钥挂进去、跑通了「加密 → 解密 → 与 `/opt/chat/.env` 逐字节相同」，然后把私钥删掉了。删掉之后那个公钥就**比没有公钥更危险**：`backup-once.sh` 会照常加密并报告 `env_backed_up: true`，而那份密文再也解不开。所以测试用的公钥与那个卷里的密文都已清掉，`infra/deploy/age/` 整目录进了 `.gitignore`）；**一个真正的 restic 仓库**（本机是 `ALLOW_LOCAL_ONLY=1` 起家的，那是显式声明的例外而不是策略）；`notify-alert.sh` 的落点（在 `ops` 模块里）。
 
 ### 测试与质量闸门（2026-09-14 本地实测）
 
@@ -222,6 +246,7 @@ pnpm typecheck   3 包全过
 pnpm test        无库机器：contracts 31 + web 9 + server 75 通过，server 另有 72 个真库用例整片 skip（7 个文件）
 真库闸门         INTEGRATION_DATABASE_URL 设上后 server 147 全过（22 文件，含真库集成与 e2e 双人聊天）
 合计             27 文件 / 187 用例，全绿（2026-09-14 用 §9 那份 Node 22 复跑确认）
+本轮备份容器      三道闸门复跑，数字未变——但**这三道闸门管不到 `infra/backup/`**：改的是 shell 脚本、Dockerfile、compose 与 .gitignore，没有一个 `.ts`。那条路只能靠 §4 运维闭环里那些真跑出来的数字，`pnpm test` 全绿不代表备份能用
 ```
 
 ### 未读徽标与读位点（已提交 `2ab03f8`）
@@ -244,7 +269,7 @@ socket handler 只注册一次，闭包里的 `selected` 会过期，所以用 `
 3. **成员管理收尾**：离职转交的批量入口、`notification_prefs`、成员列表的 `includeRemoved` 查询参数。
 4. **改密接口**：`logout-all` 已实现，但目前只能由前端显式调用，没有「改密后强制全端下线」的入口。
 5. **浏览器端仍缺**：Electron 外壳（`apps/desktop`）、改密入口、归档群入口。**成员管理界面与已读回执展示都已做**（真浏览器逐条点过），成员侧还差 `includeRemoved` 的历史成员视图与离职批量转交入口。
-6. **部署仍缺**（按「做完才能上线」的顺序）：**备份容器镜像与 `backup` 服务接线**——三个脚本已写、恢复演练已真跑过并通过（见 §4 运维闭环），但 `backup-once.sh` 现在没有任何东西调度它；**systemd 单元与 `opsctl`**；**告警接入**（`ops` 模块未开始，`presence.onDrift` 目前只能 `console.error`，`backup-once.sh` 的 `ERR` trap 指向的 `/usr/local/bin/notify-alert.sh` **在镜像里不存在**，所以现在备份失败的唯一可见落点是容器 healthcheck 变红）；**一把 age 公钥**（没有 `/etc/age/recipient.pub` 时 `backup-once.sh` 会跳过 `.env`——密钥本身因此没有被备份，而手册 4.3 说这是后果最严重的一项）；**一个 restic 仓库**（本机栈是 `ALLOW_LOCAL_ONLY=1` 起起来的，那是显式声明的例外而不是策略）。**生产 secret 注入已做**：compose 里五把钥匙全部必填、`gen-secrets.sh` 生成并校验、整套栈在注入值下真跑通（见 §4 部署）。说明书 9.2 六项对账里还剩四项（`groups.last_seq >= max(messages.seq)`、打回次数、`files.ref_count`、悬挂 attachments，逐项卡在哪见 `decisions/0011` 第五节）。`/internal/metrics` **已做**。
+6. **部署仍缺**（按「做完才能上线」的顺序）：**systemd 单元与 `opsctl`**；**告警接入**（`ops` 模块未开始，`presence.onDrift` 目前只能 `console.error`，`backup-once.sh` 的 `ERR` trap 指向的 `/usr/local/bin/notify-alert.sh` **在镜像里不存在**，所以现在备份失败的唯一可见落点是容器 healthcheck 变红）；**一把 age 私钥的存放**（公钥那一侧本轮已挂通并验到「解密后与 `/opt/chat/.env` 逐字节相同」，缺的是私钥归谁——见 §4 运维闭环末段）；**一个 restic 仓库**（本机栈是 `ALLOW_LOCAL_ONLY=1` 起起来的，那是显式声明的例外而不是策略）。**备份容器已做**：镜像 + `backup` 服务接线 + `backup-health.sh` 探活，并且恢复演练跑的就是这个容器自己产出的 dump（见 §4 运维闭环）。**生产 secret 注入已做**：compose 里五把钥匙全部必填、`gen-secrets.sh` 生成并校验、整套栈在注入值下真跑通（见 §4 部署）。说明书 9.2 六项对账里还剩四项（`groups.last_seq >= max(messages.seq)`、打回次数、`files.ref_count`、悬挂 attachments，逐项卡在哪见 `decisions/0011` 第五节）。`/internal/metrics` **已做**。
 7. **`CONTRACT_VERSION` 仍是注入的常量**（fallback `dev-nohash`），不是说明书 §7 第 4 条要求的「contracts 包 hash 前 8 位」；构建期没有计算步骤。
 8. **数据库侧只剩**：说明书 1685 行要求的 `EXPLAIN (ANALYZE, BUFFERS)` + 几千行样例数据的计划验证（见 `docs/decisions/0005`）。
 
@@ -319,6 +344,7 @@ pnpm --filter @gongyouquan/server dev
 | `0010-mentions-gaps.md` | `MentionDTO` 说明书从未定义字段；第 161 行「解析 body 中的 @」与路由表的 `mentions?` 自相矛盾（取客户端给 id + 服务端校验）；**撤回消息正文不得从 `/me/mentions` 泄漏**（会绕过 `/raw` 门禁）；跨群游标用 messageId 且现有索引撑不住（待 1685 行的计划验证）；前端「@我」计数是会话内口径；`INSERTED_COLUMNS` 那句「新消息没有聚合」的注释被推翻，send 的 ack 必须重读 |
 | `0011-metrics-coverage.md` | `/internal/metrics` 的四条取舍：**`broadcastMs` 刻意不做**（服务端只能测入队耗时，挂这个名字会让巡检项 17 永不告警、告警时又把 agent 引向错误处置；替代信号 `eventLoopLagMs`）、输出是**扁平 JSON 而非 Prometheus 文本**（栈里没有 Prometheus，巡检脚本是 `curl` + `jq`）、`outboxPending`（条数）与 `outboxLagSeconds`（年龄）**必须两个字段**、5xx 分母排除探针。第五节列了 9.2 六项对账里还剩哪四项 |
 | `0012-secret-generation-and-uri.md` | 手册 4.1 的 `openssl rand -base64 48` 与手册 3.2 的 `DATABASE_URL: postgres://user:${POSTGRES_PASSWORD}@…` **合起来会坏**：base64 字母表含 `/` 与 `+`，约 87% 的生成结果至少含一个，`pg` 报 `Invalid URL`（实测）。现在 `POSTGRES_PASSWORD` 走 hex、其余四把仍 base64。另两节：`:?` 对空值也报错所以 `.env.example` 里密钥留空；`db/01-set-password.sql` 声称的理由复现不出来，故删除而不是模板化 |
+| `0013-backup-service-env-mount-and-resource-gaps.md` | **手册 3.2 的 `backup` 服务实现不了手册 4.3 的要求**：4.3 要 `.env` age 加密随备份带走，而 3.2 只有 `env_file: [.env]`（注入环境、不留可读文件）+ `uploads`/`backups` 两个挂载，容器里既没有 `.env` 也没有放公钥的地方——失败方式是一行每天重复、没人读的警告。现在补了两个只读挂载，其中 `./age` **挂目录不挂文件**，因为 Docker 对「源文件不存在的 bind mount」会在目标处造空目录。另两节：`mem_limit` 用 256m 而不是 2.4 的 100m（**这个数字没有实测依据，上线前须按生产数据量重测**）；`ALLOW_LOCAL_ONLY` 是手册里没有的变量，把 8.1「本地副本不是备份策略」这条硬规则换成一处**显式、可见、配上 restic 后必须删掉**的例外 |
 
 几个**已拍死、改之前先看 decision** 的行为：
 
@@ -344,6 +370,7 @@ pnpm --filter @gongyouquan/server dev
 | 本机 psql | 未安装、不在 PATH —— 用 `docker exec gyq-pg psql -U gyq -d gyq_dev` |
 | Shell 路径 | 工作目录可能呈 `\\?\E:\工友圈` 形式，个别命令报 `EISDIR: lstat 'E:'`，换普通盘符路径（`/e/工友圈`）可绕过 |
 | `docker compose build` / `up --build` | **本机不可用**，`failed to dial gRPC: header key "x-docker-expose-session-sharedkey" contains value with non-printable ASCII characters`，在 bake 会话建立阶段就失败，一个字节都没开始编。`docker build` 同 Dockerfile 同上下文正常；A/B 见本节末。改 `COMPOSE_BAKE=false` 无效 |
+| `gongyouquan-backup` 构建耗时 | 实测 `real 19m59s`，其中几乎全部是第一层 `apk add bash restic age supercronic`——**慢在 daocloud 镜像源，不在 Dockerfile**。这一层被缓存后重建只花 0.7 秒（本轮改脚本后重建过两次，都是这个数）。所以「改一行脚本要等二十分钟」是不成立的，但**全新机器第一次构建请先确信 daemon 在跑**（`docker info` 通）|
 | 谁的 `.env` | `docker compose -f infra/deploy/docker-compose.yml config` 自动读的是 **`infra/deploy/.env`**（项目目录＝第一个 `-f` 文件所在目录）；而 `docker buildx bake -f 同一路径 --print` 从仓库根跑时找 **根目录 `.env`**，于是报「required variable missing」。同一个 `-f` 参数两种解释，别按其中一个的行为去推另一个 |
 
 **结论**：数据库不再是阻塞项。两个持续的小麻烦：**本机默认 Node 版本超范围**（切到上面那份 v22.23.1 即可），以及 **`docker compose build` 在这个路径下不可用**（构建一律走 `docker build` + `up --no-build`，见本节末）。
@@ -383,7 +410,7 @@ docker exec gongyouquan-db-1 psql -U gongyouquan -d gongyouquan -c \
 4. 拍板 `docs/decisions/0010` 第二节：**mentions 到底以客户端给的 id 为准，还是按第 161 行去解析 body 里的 @**。当前实现取前者（契约与路由表两处都这么写），第 161 行因此作废，需要确认。
 5. 同文件第五节：前端要不要在打开「@我」列表时推进 `mentions_read_seq`。推了，「看了一眼」就等于「处理完了」，这个语义要产品侧认。
 6. `decisions/0009` 的两条已按选项 A 落地（`sync:hello` 接通、在线快照进 `sync:ready`），可以回头关掉。
-7. 上线前剩下的那件小事：**写 `infra/backup/Dockerfile` 并在 `infra/deploy/docker-compose.yml` 加 `backup` 服务**（三个脚本已经能跑，缺的只是 restic + age + supercronic 的镜像与接线）。**生产 secret 那半件已做**（compose 全部必填 + `gen-secrets.sh`，取舍与实测见 `decisions/0012` 与 §4 部署）；接着要补的是这台机器给不了的两样：**一把 age 公钥**挂到 `/etc/age/recipient.pub`（否则 `.env` 永远不被备份），和**一个真的 restic 仓库**（否则 `ALLOW_LOCAL_ONLY=1` 这个例外声明会一直留在栈里）。恢复演练那一步已经做过一次（见 §4 运维闭环）；换到生产环境后要按生产的 dump 重做一次，**而不是反过来让脚本去迁就一次已经通过的结果**。
+7. 上线前剩下的是**这台机器给不了的两样**：**一把 age 密钥**（在机器外面 `age-keygen -o ~/gyq.age.key`，只把 `age-keygen -y` 的结果放进 `infra/deploy/age/recipient.pub`；私钥与密文同机存放等于没加密，而**一个没有对应私钥的公钥比没有公钥更糟**——`backup-once.sh` 会照常加密、报告 `env_backed_up: true`，那份密文再也解不开）；**一个真的 restic 仓库**（设上 `RESTIC_REPOSITORY` + `RESTIC_PASSWORD`，之后就该把 `ALLOW_LOCAL_ONLY=1` 这行例外声明从栈里去掉）。**上一轮那条「写 Dockerfile 并在 compose 里加 `backup` 服务」已完成**（`5dd2822`）：镜像、接线、`backup-health.sh` 都到位，恢复演练跑的正是这个容器自己 dump 出来的那一份，实测数字与几条负向验证见 §4 运维闭环。换到生产环境后要按生产的 dump 重做一次演练，**而不是反过来让脚本去迁就一次已经通过的结果**。
 8. 之后才往 `tasks / files / search / ops` 走——这是仅剩的四个整块未动的模块，其中 `ops` 会补上 `presence.onDrift` 与告警的落点。
 
 ---
@@ -415,3 +442,6 @@ docker exec gongyouquan-db-1 psql -U gongyouquan -d gongyouquan -c \
 23. **`${VAR:?}` 只检查「有值」，不检查「值是占位符」。** 让 `docker compose config` 在缺密钥时拒绝解析，靠的是必填插值本身；如果 `.env.example` 里写的是 `JWT_SECRET=replace-me`，那把它复制过去、不改、上线，检查一声不响地通过。所以模板里五把钥匙**全是空值**（`:?` 同样拒绝空值），而 `gen-secrets.sh` 会填并拒绝覆盖。推论：任何「必填」都要问一句**没填与填错哪个更难发现**。
 24. **删掉一个写死的默认值，不等于修好了。** `01-set-password.sql` 被删的理由是它把凭据写在仓库里，而它注释里那句「只靠 `POSTGRES_PASSWORD` 会得到 verifier 不匹配的角色」在当前镜像上复现不出来（见 `decisions/0012` 第三节）——**但如果那个说法在别的版本上成立，删掉它会让栈起不来，而且报错指向认证而不是指向被删的文件**。所以这次删完立刻把整套栈真跑一遍（`/readyz` healthy + 建号 + 登录 + 带 token 的请求），而不是只做 `config` 的静态检查。
 25. **本机 `docker compose build` 不可用**（坑 21 那个 shell 之外的另一个路径限制）：仓库在 `E:\工友圈`，中文路径让 buildx 的 bake 会话头带上非 ASCII 字节，构建在开工前就失败。`docker build` 不受影响，所以流程是 `docker build -t <project>-<service>` 三个镜像再 `up -d --no-build`。这条只对**这台机器**成立，Linux 部署机上 `up --build` 是好的——别把它当项目缺陷去"修"。另外 `chmod 600` 在 NTFS 上不可观测（Git Bash 里 `/tmp` 中的文件怎么设都报 `644`），`gen-secrets.sh` 里那行是给部署机写的。
+26. **镜像设了 `ENTRYPOINT` 之后，`docker run IMAGE sh -c '…'` 不会换掉入口程序，而是把 `sh -c '…'` 当成参数交给它**。`backup` 镜像的 entrypoint 是 `backup-loop.sh`，所以那条命令的真实行为是「开始跑调度器并且永不退出」——表现成一个毫无输出的 120 秒超时，看不出任何一层报错。一次性地用镜像里的工具要写 `docker run --entrypoint sh IMAGE -c '…'`（`docker compose run --entrypoint …` 同理）。
+27. **一个没有对应私钥的 age 公钥，比没有公钥更糟**。没有公钥时 `backup-once.sh` 走的是它设计好的那条路：跳过 `.env`、打一行警告、`last_success.json` 里 `env_backed_up: false`——**看得见地没做**。挂上一个私钥已经不存在的公钥之后，它每次都成功加密、每次都报 `env_backed_up: true`，而那份密文再也解不开；错误要等到真正要恢复的那天才暴露，且那时看起来像「备份明明做了」。所以演练用的公钥必须与测试密文一起删掉。**推广**：加一个「可选依赖」的守卫时，要检查**它缺席时的那条路是否比它在场但配错时更容易发现**。
+28. **可空列当非空用，第三次了**（坑 14 的同一条教训换个地方）：`restore-drill.sh` 的验收 3.3 拿 `body IS NULL OR body = ''` 当「dump 被截断」的证据，而 `messages.body` 按 `0001_init.sql:150` 就是可空的，`image / file / system / task_card` 三种消息根本没有正文——**第一张图片发出去，恢复演练就会判失败**。一个总是误报的检查比没有检查更危险，因为它教会人无视这个绿灯。顺带一条同源的坑：**命名卷不跟 `docker compose down` 一起消失**，所以 `backup-loop.sh` 那段「找不到 `last_success.json` 就首跑」的逻辑在已有卷的机器上永远不会再进那个分支——要复现首次行为必须显式 `docker volume rm <project>_backups`。

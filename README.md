@@ -22,12 +22,12 @@
   `docker compose -f infra/deploy/docker-compose.yml up -d --build`，再
   `docker compose -f infra/deploy/docker-compose.yml run --rm --workdir /app/apps/server server node --import tsx src/cli/create-admin.ts` 建首个账号
   （缺密钥时 `docker compose config` 直接拒绝解析，取舍见 `docs/decisions/0012`）
-- 尚未接入：tasks/files/search/ops、Electron；备份只有 `infra/backup/` 三个脚本，还没有跑它们的容器
+- 尚未接入：tasks/files/search/ops、Electron。**备份已经不是一个脚本而是一个容器**：`infra/backup/Dockerfile` + compose 里的 `backup` 服务，由 supercronic 按 `BACKUP_HOUR`/`BACKUP_MINUTE` 调度，`backup-health.sh` 做「多久没有成功备份」的探活；恢复演练真跑过一次并通过，用的就是这个容器自己 dump 出来的那份（数字见 `docs/HANDOVER.md` §4）
 - 真实 PostgreSQL 验证**已完成**（PG 17.11）：建库、迁移连跑两次为 no-op、checksum 防篡改、auth/groups 的 SQL 真跑，
   固化为 `apps/server/tests/integration/` 与 `tests/e2e/`（47 个用例，分布在 3 个文件；由 `INTEGRATION_DATABASE_URL` 开关，不设则整体 skip）
 - 本地起库：`docker compose -f infra/db/docker-compose.yml up -d`（宿主端口 55432；镜像走 daocloud 源，Docker Hub 在本机不可达）
 - 真库首跑暴露的 6 条矛盾与缺口登记在 `docs/decisions/0005`，其中一条推翻说明书 4.2 关于 seq 空洞的论断
-- **不能直接对外上线**：还缺 `ops` 模块（`/hooks/*`、告警落点、巡检）、备份容器、systemd 与 `opsctl`；Caddy 在这个栈里是 `auto_https off` 的明文 :8080
+- **不能直接对外上线**：还缺 `ops` 模块（`/hooks/*`、告警落点、巡检——`backup-once.sh` 失败时该说话的 `notify-alert.sh` 也在那里）、systemd 单元与 `opsctl`；以及这台机器给不了的两样凭据：一把**私钥放在机器外**的 age 密钥，和一个**真的 restic 仓库**（现在栈是靠 `ALLOW_LOCAL_ONLY=1` 这个显式例外声明起起来的，那不是备份策略）。Caddy 在这个栈里是 `auto_https off` 的明文 :8080
 
 ## 目录约定
 
