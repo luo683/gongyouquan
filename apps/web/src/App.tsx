@@ -35,9 +35,17 @@ export function App() {
    */
   const [roster, setRoster] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState('');
+  const [newGroupName, setNewGroupName] = useState('');
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<Socket | null>(null);
   const statesRef = useRef<Record<string, GroupState>>({});
+  /**
+   * The socket handlers are registered once (openSocket closes over [commit]),
+   * so reading `selected` from closure there would go stale the moment the user
+   * switches rooms. This ref mirrors it, letting message:new decide whether its
+   * group is the one actually on screen and therefore being read.
+   */
+  const selectedRef = useRef<string | null>(null);
 
   const phase: Phase = tokens && hasSession() ? 'working' : 'signed-out';
 
@@ -75,6 +83,9 @@ export function App() {
 
       socket.on('message:new', (message: MessageDto) => {
         commit(message.groupId, (state) => void applyNew(state, message));
+        // Only the room on screen is being read; a message in another group has
+        // to keep its badge, or unread counts would always be zero.
+        if (message.groupId === selectedRef.current) void advanceRead(message.groupId, message.seq);
       });
       socket.on('message:updated', (message: MessageDto) => {
         commit(message.groupId, (state) => void applyEvent(state, message));
@@ -128,6 +139,10 @@ export function App() {
 
   async function chooseGroup(groupId: string): Promise<void> {
     setSelected(groupId);
+    // Set the mirror synchronously: the useEffect only runs after render, and a
+    // message:new landing mid-await would otherwise be judged against the room we
+    // just left.
+    selectedRef.current = groupId;
     setNotice('');
     const socket = socketRef.current;
     if (!socket) return;
@@ -149,7 +164,11 @@ export function App() {
     } catch (error) {
       if (error instanceof ApiError) setNotice(error.message);
     }
-    if (local.syncedSeq >= 0) void pull(socket, groupId, statesRef.current[groupId]?.syncedSeq ?? 0, commit);
+    await pull(socket, groupId, statesRef.current[groupId]?.syncedSeq ?? local.syncedSeq, commit);
+    // Opening the room marks everything now loaded as read. advanceRead is
+    // monotonic server-side (GREATEST), so this only ever moves the badge forward.
+    const synced = statesRef.current[groupId]?.syncedSeq ?? 0;
+    if (synced > 0) await advanceRead(groupId, synced);
   }
 
   async function send(): Promise<void> {
@@ -175,12 +194,21 @@ export function App() {
    * Creating a group is the one write the sidebar can offer without guessing at
    * an endpoint: POST /groups exists and makes the caller its owner.
    */
+  /**
+   * An inline field rather than window.prompt: a modal dialog cannot be driven
+   * by an automated browser, is suppressed in some embedded webviews, and gives
+   * no way to show the server's reason when the name is rejected.
+   */
   async function createGroup(): Promise<void> {
-    const name = globalThis.window.prompt('群名称', `夜班组-${new Date().toISOString().slice(5, 10)}`);
-    if (!name || !name.trim()) return;
+    const name = newGroupName.trim();
+    if (!name) {
+      setNotice('先给群起个名字');
+      return;
+    }
     try {
-      const created = await api.createGroup({ name: name.trim() });
+      const created = await api.createGroup({ name });
       setNotice('');
+      setNewGroupName('');
       await refreshGroups();
       setSelected(created.id);
     } catch (error) {
@@ -203,6 +231,32 @@ export function App() {
     }
   }
 
+  /**
+   * Opening a room, and every message that lands while it is open, advances the
+   * read position. Without this the unread badge can never clear - api.read()
+   * existed and nothing called it, which is exactly the kind of half-wired
+   * feature that looks finished in a screenshot.
+   *
+   * It is monotonic server-side (GREATEST), so a stale call is harmless rather
+   * than a race: this is also why no client-side "highest sent" bookkeeping is needed.
+   */
+  const lastSentRead = useRef<Record<string, number>>({});
+  async function advanceRead(groupId: string, seq: number): Promise<void> {
+    if (seq <= (lastSentRead.current[groupId] ?? 0)) return;
+    lastSentRead.current[groupId] = seq;
+    const socket = socketRef.current;
+    if (socket?.connected) {
+      socket.emit('read:update', { groupId, lastReadSeq: seq }, () => void refreshGroups());
+      return;
+    }
+    try {
+      await api.read(groupId, seq);
+      await refreshGroups();
+    } catch (error) {
+      if (error instanceof ApiError) setNotice(error.message);
+    }
+  }
+
   async function revoke(message: MessageDto): Promise<void> {
     const socket = socketRef.current;
     if (!socket) return;
@@ -211,6 +265,10 @@ export function App() {
       if (response?.error) setNotice(copyFor(response.error.code));
     });
   }
+
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
 
   useEffect(() => {
     return () => {
@@ -278,15 +336,24 @@ export function App() {
         <button type="button" className="link" onClick={() => void refreshGroups()}>
           刷新群列表
         </button>
-        <button
-          type="button"
-          className="link"
-          onClick={() => {
+        <form
+          className="newgroup"
+          onSubmit={(event) => {
+            event.preventDefault();
             void createGroup();
           }}
         >
-          新建群
-        </button>
+          <input
+            value={newGroupName}
+            onChange={(event) => setNewGroupName(event.target.value)}
+            placeholder="新群名称"
+            aria-label="新群名称"
+            maxLength={40}
+          />
+          <button type="submit" disabled={newGroupName.trim().length === 0}>
+            新建群
+          </button>
+        </form>
         {/*
           There is deliberately no "paste an invite code" box for a signed-in
           user. Spec 3.1 line 209 makes an invite code something registration

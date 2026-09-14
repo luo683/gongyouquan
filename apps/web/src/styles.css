@@ -35,3 +35,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .empty { color: #6b6b73; font-size: .85rem; }
 .compose { display: flex; gap: .5rem; }
 .compose input { flex: 1; }
+.newgroup { display: flex; gap: .4rem; margin-top: .5rem; }
+.newgroup input { flex: 1; min-width: 0; }
+.newgroup button { padding: .4rem .6rem; border: 0; border-radius: 6px; background: #2f6feb; color: #fff; cursor: pointer; font: inherit; }
+.newgroup button:disabled { opacity: .5; cursor: not-allowed; }
