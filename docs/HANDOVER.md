@@ -9,7 +9,7 @@
 
 ## 1. 一句话现状
 
-后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；**已读回执、typing、presence（含在线快照）、@提及四条都已两侧打通**；`sync:hello` 已接通，服务端 `contractVersion` 现在真的会到浏览器；浏览器端（React + Vite）可真聊、未读徽标会消、成员管理可逐条点通、能 @ 人并收到「@我」列表。运维闭环起步：`/internal/metrics` 已按「只报能真实测到的」实现，`infra/backup/` 三个脚本已写，且**恢复演练不是文档而是真跑过一次并通过**（含两次故意失败的负向验证）。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 四个整块未动的模块、Electron 外壳、备份容器镜像与 compose 接线、生产 secret 注入、systemd / `opsctl` / 告警落点，**数据库与核心收发链路不再是阻塞项**。
+后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；**已读回执、typing、presence（含在线快照）、@提及四条都已两侧打通**；`sync:hello` 已接通，服务端 `contractVersion` 现在真的会到浏览器；浏览器端（React + Vite）可真聊、未读徽标会消、成员管理可逐条点通、能 @ 人并收到「@我」列表。运维闭环起步：`/internal/metrics` 已按「只报能真实测到的」实现，`infra/backup/` 三个脚本已写，且**恢复演练不是文档而是真跑过一次并通过**（含两次故意失败的负向验证）。部署栈的密钥已改成必填插值，缺任何一个 `docker compose config` 直接拒绝解析（见 `decisions/0012`）。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 四个整块未动的模块、Electron 外壳、备份容器镜像与 compose 接线、systemd / `opsctl` / 告警落点，**数据库与核心收发链路不再是阻塞项**。
 
 ---
 
@@ -102,10 +102,10 @@ a533923 feat: wire the sync:hello handshake and put a presence snapshot in it
 │   └── src/{App.tsx,api.ts,copy.ts,syncStore.ts,main.tsx,styles.css}
 ├── packages/contracts/     共享契约（Zod schema + 类型），前后端唯一真源
 ├── infra/db/               docker-compose.yml（dev PG）+ migrations/（0001,0002）
-├── infra/deploy/           docker-compose.yml + Caddyfile + 两个 Dockerfile（一键全栈）
-├── infra/backup/           backup-once.sh / restore-drill.sh / backup-loop.sh（手册 8.1-8.3，见 §4 末）
+├── infra/deploy/           docker-compose.yml + Caddyfile + 两个 Dockerfile + .env.example + gen-secrets.sh
+├── infra/backup/           Dockerfile + backup-once.sh / backup-loop.sh / restore-drill.sh / backup-health.sh
 ├── docs/specs/             三份说明书原件（01-后端 / 02-前端 / 03-AI运维）
-├── docs/decisions/         矛盾与缺口登记（0001-0011）
+├── docs/decisions/         矛盾与缺口登记（0001-0012）
 ├── eslint.config.js        根级 ESLint（flat config），lint 现已是真实闸门
 └── .github/workflows/      CI（见 §7）
 ```
@@ -189,9 +189,12 @@ GET    /internal/metrics
 
 ### 部署 `infra/deploy`
 
-- `docker compose -f infra/deploy/docker-compose.yml up -d` —— Postgres + API + Caddy（静态托管与 `/api`、`/socket.io` 反代），三条健康检查串成启动顺序，含 `create-admin` 引导
-- Caddy 只反代 `/api/*`、`/socket.io/*`、`/healthz`、`/readyz`，**`/internal/*` 不在其中**，所以 metrics 天然只存在于容器网内——这一点是上面那个 loopback 守卫成立的前提
-- **口令是开发值，不能带上公网**：`POSTGRES_PASSWORD` / `JWT_SECRET` / `MEILI_MASTER_KEY` / `ALERT_HMAC_SECRET` 在这个文件里是**写死的字面量**（`'dev-db-password-local-only'` 这类），不是 `${VAR}` 插值。要做成生产可用，就得把这四个换成必填插值（`${VAR:?...}`），让 `docker compose config` 在变量缺失时**直接拒绝解析**而不是安静地用一个大家都能从 GitHub 上读到的值。这一步还没做，是 §5 第 6 条里排在备份镜像之后的那件
+- **密钥全部必填，仓库里一个口令都没有了**。起法：`cp infra/deploy/.env.example infra/deploy/.env` → `infra/deploy/gen-secrets.sh` → `docker compose -f infra/deploy/docker-compose.yml up -d --build`。compose 里五个密钥（`POSTGRES_USER/DB` 与 `POSTGRES_PASSWORD` / `JWT_SECRET` / `MEILI_MASTER_KEY` / `ALERT_HMAC_SECRET` / `RESTIC_PASSWORD`）都是 `${VAR:?…}`，缺任何一个 `docker compose config` **拒绝解析**（实测：`error while interpolating services.db.environment.POSTGRES_PASSWORD: required variable POSTGRES_PASSWORD is missing a value`）。`:?` 对**空值同样报错**，所以 `.env.example` 里那五把钥匙是留空的——复制了没生成就必然起不来
+- `gen-secrets.sh` 逐把校验字符集与长度、数一遍五把确实互不相同、**拒绝覆盖已存在的 `.env`**。为什么是脚本不是一段说明：见 `decisions/0012` 第五节
+- **整套栈在注入的密钥下真跑通过**（2026-09-14）：`/readyz` healthy（就绪判定要求真连上库，所以这条同时证明了插值出来的 `DATABASE_URL` 能用）、`create-admin` 建号并自校验登录、`POST /auth/login` 出 token、带 token 的 `GET /groups` 返回系统群、不带 token 401。**旧的 `db/01-set-password.sql` 已删除**（它声称的理由在当前镜像上复现不出来，而它实际做的事是把凭据写进仓库；见 `decisions/0012` 第三节）
+- **换密钥对已有数据卷无效**——`POSTGRES_PASSWORD` 只在空数据目录时被应用一次。本机默认项目那个已有卷已按 `ALTER USER` 轮换（容器内 psql 走 localhost trust 行，所以不需要旧密码），换完 `up -d` 全绿；**别的项目/机器上重做这件事时，直接 `up` 会得到一个 28P01 且报错不提「卷是旧的」**
+- Caddy 只反代 `/api/*`、`/socket.io/*`、`/healthz`、`/readyz`，**`/internal/*` 不在其中**，所以 metrics 天然只存在于容器网内——这一点是上面那个 loopback 守卫成立的前提。**但「不在其中」的表现不是 404 而是 200**：`GET :8080/internal/metrics` 落到 SPA 的 `try_files … /index.html` 兜底，返回 200 + 395 字节 HTML。body 里没有指标，可**任何用 `curl -f` 或只看状态码的巡检都会把它读成「能访问」**。守卫另一侧也实测过：从 db 容器访问 `server:3000/internal/metrics` → **403**，从 server 容器自己访问 `127.0.0.1:3000` → 200 + JSON。所以巡检脚本必须 `docker exec` 进 server 容器里跑，或者带上 `INTERNAL_METRICS_TOKEN`
+- `create-admin` 在容器里的可用命令要带 `--workdir`：镜像的 `WORKDIR` 是 `/app` 而 `tsx` 只装在 `apps/server` 下，所以 `docker compose run --rm server node --import tsx src/cli/create-admin.ts`（本文档旧版的写法）报的是 `Cannot find package 'tsx' imported from /app/`。验证过的写法：`docker compose -f infra/deploy/docker-compose.yml run --rm --workdir /app/apps/server server node --import tsx src/cli/create-admin.ts --username <名>`（Git Bash 下要加 `MSYS_NO_PATHCONV=1`，见 §11 坑 21）
 
 ### 运维闭环 `infra/backup`（手册 8.1-8.3）
 
@@ -241,7 +244,7 @@ socket handler 只注册一次，闭包里的 `selected` 会过期，所以用 `
 3. **成员管理收尾**：离职转交的批量入口、`notification_prefs`、成员列表的 `includeRemoved` 查询参数。
 4. **改密接口**：`logout-all` 已实现，但目前只能由前端显式调用，没有「改密后强制全端下线」的入口。
 5. **浏览器端仍缺**：Electron 外壳（`apps/desktop`）、改密入口、归档群入口。**成员管理界面与已读回执展示都已做**（真浏览器逐条点过），成员侧还差 `includeRemoved` 的历史成员视图与离职批量转交入口。
-6. **部署仍缺**（按「做完才能上线」的顺序）：**备份容器镜像与 `backup` 服务接线**——三个脚本已写、恢复演练已真跑过并通过（见 §4 运维闭环），但 `backup-once.sh` 现在没有任何东西调度它；**生产版 secret 注入**（`infra/deploy/docker-compose.yml` 里仍是写死的开发默认值，应改成必填、缺失即启动失败，另按手册 4.3 把 `.env` 加密带走）；systemd 单元与 `opsctl`；告警接入（`ops` 模块未开始，`presence.onDrift` 目前只能 `console.error`）；说明书 9.2 六项对账里还剩四项（`groups.last_seq >= max(messages.seq)`、打回次数、`files.ref_count`、悬挂 attachments，逐项卡在哪见 `decisions/0011` 第五节）。`/internal/metrics` **已做**。
+6. **部署仍缺**（按「做完才能上线」的顺序）：**备份容器镜像与 `backup` 服务接线**——三个脚本已写、恢复演练已真跑过并通过（见 §4 运维闭环），但 `backup-once.sh` 现在没有任何东西调度它；**systemd 单元与 `opsctl`**；**告警接入**（`ops` 模块未开始，`presence.onDrift` 目前只能 `console.error`，`backup-once.sh` 的 `ERR` trap 指向的 `/usr/local/bin/notify-alert.sh` **在镜像里不存在**，所以现在备份失败的唯一可见落点是容器 healthcheck 变红）；**一把 age 公钥**（没有 `/etc/age/recipient.pub` 时 `backup-once.sh` 会跳过 `.env`——密钥本身因此没有被备份，而手册 4.3 说这是后果最严重的一项）；**一个 restic 仓库**（本机栈是 `ALLOW_LOCAL_ONLY=1` 起起来的，那是显式声明的例外而不是策略）。**生产 secret 注入已做**：compose 里五把钥匙全部必填、`gen-secrets.sh` 生成并校验、整套栈在注入值下真跑通（见 §4 部署）。说明书 9.2 六项对账里还剩四项（`groups.last_seq >= max(messages.seq)`、打回次数、`files.ref_count`、悬挂 attachments，逐项卡在哪见 `decisions/0011` 第五节）。`/internal/metrics` **已做**。
 7. **`CONTRACT_VERSION` 仍是注入的常量**（fallback `dev-nohash`），不是说明书 §7 第 4 条要求的「contracts 包 hash 前 8 位」；构建期没有计算步骤。
 8. **数据库侧只剩**：说明书 1685 行要求的 `EXPLAIN (ANALYZE, BUFFERS)` + 几千行样例数据的计划验证（见 `docs/decisions/0005`）。
 
@@ -315,6 +318,7 @@ pnpm --filter @gongyouquan/server dev
 | `0009-typing-presence-gaps.md` | 说明书**没有** server→client 的 typing 事件（只定义了客户端怎么发）、没有 presence 快照（**已按选项 A 补进 `sync:ready`**）、以及**既有缺陷：浏览器端从不发 `sync:hello`**（**已接通**），此前导致 `sync:ready` 是死代码、`contractVersion` 版本守卫从未生效 |
 | `0010-mentions-gaps.md` | `MentionDTO` 说明书从未定义字段；第 161 行「解析 body 中的 @」与路由表的 `mentions?` 自相矛盾（取客户端给 id + 服务端校验）；**撤回消息正文不得从 `/me/mentions` 泄漏**（会绕过 `/raw` 门禁）；跨群游标用 messageId 且现有索引撑不住（待 1685 行的计划验证）；前端「@我」计数是会话内口径；`INSERTED_COLUMNS` 那句「新消息没有聚合」的注释被推翻，send 的 ack 必须重读 |
 | `0011-metrics-coverage.md` | `/internal/metrics` 的四条取舍：**`broadcastMs` 刻意不做**（服务端只能测入队耗时，挂这个名字会让巡检项 17 永不告警、告警时又把 agent 引向错误处置；替代信号 `eventLoopLagMs`）、输出是**扁平 JSON 而非 Prometheus 文本**（栈里没有 Prometheus，巡检脚本是 `curl` + `jq`）、`outboxPending`（条数）与 `outboxLagSeconds`（年龄）**必须两个字段**、5xx 分母排除探针。第五节列了 9.2 六项对账里还剩哪四项 |
+| `0012-secret-generation-and-uri.md` | 手册 4.1 的 `openssl rand -base64 48` 与手册 3.2 的 `DATABASE_URL: postgres://user:${POSTGRES_PASSWORD}@…` **合起来会坏**：base64 字母表含 `/` 与 `+`，约 87% 的生成结果至少含一个，`pg` 报 `Invalid URL`（实测）。现在 `POSTGRES_PASSWORD` 走 hex、其余四把仍 base64。另两节：`:?` 对空值也报错所以 `.env.example` 里密钥留空；`db/01-set-password.sql` 声称的理由复现不出来，故删除而不是模板化 |
 
 几个**已拍死、改之前先看 decision** 的行为：
 
@@ -339,14 +343,32 @@ pnpm --filter @gongyouquan/server dev
 | 运行中的数据库 | `gyq-pg` 容器，宿主端口 **55432**（避开本机 5432），由 `infra/db/docker-compose.yml` 管理；带 volume `gyq-pgdata`，`down` 不丢数据，`down -v` 才丢 |
 | 本机 psql | 未安装、不在 PATH —— 用 `docker exec gyq-pg psql -U gyq -d gyq_dev` |
 | Shell 路径 | 工作目录可能呈 `\\?\E:\工友圈` 形式，个别命令报 `EISDIR: lstat 'E:'`，换普通盘符路径（`/e/工友圈`）可绕过 |
+| `docker compose build` / `up --build` | **本机不可用**，`failed to dial gRPC: header key "x-docker-expose-session-sharedkey" contains value with non-printable ASCII characters`，在 bake 会话建立阶段就失败，一个字节都没开始编。`docker build` 同 Dockerfile 同上下文正常；A/B 见本节末。改 `COMPOSE_BAKE=false` 无效 |
+| 谁的 `.env` | `docker compose -f infra/deploy/docker-compose.yml config` 自动读的是 **`infra/deploy/.env`**（项目目录＝第一个 `-f` 文件所在目录）；而 `docker buildx bake -f 同一路径 --print` 从仓库根跑时找 **根目录 `.env`**，于是报「required variable missing」。同一个 `-f` 参数两种解释，别按其中一个的行为去推另一个 |
 
-**结论**：数据库不再是阻塞项。唯一持续的小麻烦是**本机默认 Node 版本超范围**——切到上面那份 v22.23.1 即可。
+**结论**：数据库不再是阻塞项。两个持续的小麻烦：**本机默认 Node 版本超范围**（切到上面那份 v22.23.1 即可），以及 **`docker compose build` 在这个路径下不可用**（构建一律走 `docker build` + `up --no-build`，见本节末）。
 
 **端口不一定空着**：上一轮会话留下的 dev 服务可能仍占着 3000（连同它自己的 Vite 占着 5173）。那个实例跑的是**旧代码**，`curl` 一下新加的路由就能分辨（注册了返回 401，没有返回 404）。别急着杀别人的进程——`vite.config.ts` 的代理目标和端口都能用环境变量覆盖，另起一套即可：
 
 ```bash
 PORT=3100 ... pnpm --filter @gongyouquan/server dev          # 自己的后端
 VITE_DEV_API_ORIGIN=http://127.0.0.1:3100 pnpm --filter @gongyouquan/web dev
+```
+
+**一键全栈（本机唯一可行的构建路径）**：`docker compose build` 在这台机器上跑不通，而 `docker build` 同一份 Dockerfile、同一个上下文正常。A/B 过：整棵树去掉 `node_modules` 与 `.git` 复制到 `C:\Users\ROG\gyq-ascii`（`node_modules` 本来就在 `.dockerignore` 里，对构建无影响），在那里 `docker compose -f infra/deploy/docker-compose.yml build server` 成功，回到 `E:\工友圈` 同样的命令失败——**唯一变量是路径里的中文**。报错是 buildx 在 bake 会话建立阶段拒绝一个含非 ASCII 字节的内部头，**具体是哪个字段带进去的属于 Docker Desktop 的问题，不在本项目范围内**。所以先 `docker build` 再 `up --no-build`：
+
+```bash
+cp infra/deploy/.env.example infra/deploy/.env   # 五个密钥故意留空
+infra/deploy/gen-secrets.sh                      # 填上，拒绝覆盖已有 .env
+docker build -f infra/deploy/Dockerfile.server -t gongyouquan-server .
+docker build -f infra/deploy/Dockerfile.web    -t gongyouquan-web    .
+docker build -f infra/backup/Dockerfile        -t gongyouquan-backup .
+docker compose -f infra/deploy/docker-compose.yml up -d --no-build
+MSYS_NO_PATHCONV=1 docker compose -f infra/deploy/docker-compose.yml run --rm \
+  --workdir /app/apps/server server node --import tsx src/cli/create-admin.ts --username admin
+# 已有 dbdata 卷时先轮换一次角色密码，否则后端会 28P01（见 §4 部署第 4 条）：
+docker exec gongyouquan-db-1 psql -U gongyouquan -d gongyouquan -c \
+  "ALTER USER gongyouquan WITH PASSWORD '$(grep ^POSTGRES_PASSWORD= infra/deploy/.env | cut -d= -f2)'"
 ```
 
 **验收遗留数据**（`create-admin` + 注册产生，纯新增，可直接复用或删）：群 `验收群` id `714`（两人）与 `独人群` id `715`（只有 mate，用来验 `totalMembers=0` 时不渲染 chip）；账号 `boss`（id 771，口令 `Verify2026ok`，现为**管理员**）与 `mate`（id 772，口令 `MatePass2026`，现为**群主**）——两者是被转让过的，不是初始状态。另有一条 `BOOT-B4FA82BD6D47`（管理员 / 5 次）与一条已撤销的成员码。两个账号都在，浏览器验收不必重新造。
@@ -361,7 +383,7 @@ VITE_DEV_API_ORIGIN=http://127.0.0.1:3100 pnpm --filter @gongyouquan/web dev
 4. 拍板 `docs/decisions/0010` 第二节：**mentions 到底以客户端给的 id 为准，还是按第 161 行去解析 body 里的 @**。当前实现取前者（契约与路由表两处都这么写），第 161 行因此作废，需要确认。
 5. 同文件第五节：前端要不要在打开「@我」列表时推进 `mentions_read_seq`。推了，「看了一眼」就等于「处理完了」，这个语义要产品侧认。
 6. `decisions/0009` 的两条已按选项 A 落地（`sync:hello` 接通、在线快照进 `sync:ready`），可以回头关掉。
-7. 上线前剩下的两件小事，按顺序：**写 `infra/backup/Dockerfile` 并在 `infra/deploy/docker-compose.yml` 加 `backup` 服务**（`backup-once.sh` / `backup-loop.sh` 已经能跑，缺的只是 restic + age + supercronic 的镜像与接线），以及**把生产 secret 从默认值改成必填**（手册 4.1：五个密钥逐个生成、不许共用同一个值）。后者要在改完跑 `docker compose -f infra/deploy/docker-compose.yml config` 看解析结果，并**刻意不设某个变量**确认它真的拒绝启动。恢复演练那一步已经做过一次（见 §4 运维闭环）；换到生产环境后要按生产的 dump 重做一次，**而不是反过来让脚本去迁就一次已经通过的结果**。
+7. 上线前剩下的那件小事：**写 `infra/backup/Dockerfile` 并在 `infra/deploy/docker-compose.yml` 加 `backup` 服务**（三个脚本已经能跑，缺的只是 restic + age + supercronic 的镜像与接线）。**生产 secret 那半件已做**（compose 全部必填 + `gen-secrets.sh`，取舍与实测见 `decisions/0012` 与 §4 部署）；接着要补的是这台机器给不了的两样：**一把 age 公钥**挂到 `/etc/age/recipient.pub`（否则 `.env` 永远不被备份），和**一个真的 restic 仓库**（否则 `ALLOW_LOCAL_ONLY=1` 这个例外声明会一直留在栈里）。恢复演练那一步已经做过一次（见 §4 运维闭环）；换到生产环境后要按生产的 dump 重做一次，**而不是反过来让脚本去迁就一次已经通过的结果**。
 8. 之后才往 `tasks / files / search / ops` 走——这是仅剩的四个整块未动的模块，其中 `ops` 会补上 `presence.onDrift` 与告警的落点。
 
 ---
@@ -388,4 +410,8 @@ VITE_DEV_API_ORIGIN=http://127.0.0.1:3100 pnpm --filter @gongyouquan/web dev
 18. **socket 事件不带 ack 回调，服务端曾经整个 handler 都不执行。** `call()` 的第一行是 `if (typeof ack !== 'function') return;`。因为 `follow()`（加入房间）就在这些 handler 里面，漏传 ack 的客户端会**静默地不收任何广播**——没有错误、没有 ack、日志里也没有。已改成「照做，只是不回 ack」，并有变异验证。教训：**一个只负责「回话」的包装函数，不该顺带决定「做不做事」**。
 19. **跑闸门会把 `packages/contracts/dist` 重写一遍，Vite 可能把写坏那一刻的模块缓存住。** 症状是浏览器报 `does not provide an export named 'errorEnvelopeSchema'`、页面白屏，而磁盘上的 dist 明明是对的（`?t=` 时间戳停在了那一刻）。**光重载页面没用**，要停掉 Vite、`rm -rf apps/web/node_modules/.vite`、再重启。这一轮踩了两次。
 20. **`postgres:17-alpine` 里没有 bash。** 恢复演练脚本最自然的执行位置就是这个临时容器内部，而镜像只有 `/bin/sh`（busybox）。写成 `#!/usr/bin/env bash` 的结果是 `docker exec` 报一个和备份逻辑毫无关系的错。`restore-drill.sh` 因此刻意用 POSIX sh 写（`set -eu` 而非 `set -euo pipefail`，没有 `[[`、没有 `local -n`）。
-21. **Git Bash 会把 `docker cp` / `docker run` 参数里的 `/tmp/xxx` 重写成 `E:/tmp/xxx`。** MSYS 的路径转换看到「以斜杠开头的 Unix 风格路径」就去翻它，结果容器里收到一个根本不存在的 Windows 路径。加 `MSYS_NO_PATHCONV=1` 前缀，或者把路径写成容器内的绝对路径并在 `docker exec` 里引用。**症状很有欺骗性**：命令报「No such file or directory」，而那个文件在容器里明明白白存在。
+21. **Git Bash 会把 `docker cp` / `docker run` 参数里的 `/tmp/xxx` 重写成 `E:/tmp/xxx`。** MSYS 的路径转换看到「以斜杠开头的 Unix 风格路径」就去翻它，结果容器里收到一个根本不存在的 Windows 路径。加 `MSYS_NO_PATHCONV=1` 前缀，或者把路径写成容器内的绝对路径并在 `docker exec` 里引用。**症状很有欺骗性**：命令报「No such file or directory」，而那个文件在容器里明明白白存在。本轮 `docker compose run --workdir /app/apps/server` 又踩一次（报的是 `the working directory 'E:/git/Git/app/apps/server' is invalid`）。
+22. **base64 生成的密码不能拼进 URI。** `openssl rand -base64 48` 里有 `/` 与 `+`，而 `DATABASE_URL: postgres://user:${POSTGRES_PASSWORD}@host/db` 是 URI——`pg` 抛 `Invalid URL`，`psql` 报 `invalid integer value "a" for connection option "port"` 或 `could not translate host name "ss"`。约 87% 的生成结果含至少一个，所以这不是边缘情况而是常态。`POSTGRES_PASSWORD` 因此改成 hex（`gen-secrets.sh`），其余四把仍 base64（它们不进 URL）。全文见 `decisions/0012` 第一节。
+23. **`${VAR:?}` 只检查「有值」，不检查「值是占位符」。** 让 `docker compose config` 在缺密钥时拒绝解析，靠的是必填插值本身；如果 `.env.example` 里写的是 `JWT_SECRET=replace-me`，那把它复制过去、不改、上线，检查一声不响地通过。所以模板里五把钥匙**全是空值**（`:?` 同样拒绝空值），而 `gen-secrets.sh` 会填并拒绝覆盖。推论：任何「必填」都要问一句**没填与填错哪个更难发现**。
+24. **删掉一个写死的默认值，不等于修好了。** `01-set-password.sql` 被删的理由是它把凭据写在仓库里，而它注释里那句「只靠 `POSTGRES_PASSWORD` 会得到 verifier 不匹配的角色」在当前镜像上复现不出来（见 `decisions/0012` 第三节）——**但如果那个说法在别的版本上成立，删掉它会让栈起不来，而且报错指向认证而不是指向被删的文件**。所以这次删完立刻把整套栈真跑一遍（`/readyz` healthy + 建号 + 登录 + 带 token 的请求），而不是只做 `config` 的静态检查。
+25. **本机 `docker compose build` 不可用**（坑 21 那个 shell 之外的另一个路径限制）：仓库在 `E:\工友圈`，中文路径让 buildx 的 bake 会话头带上非 ASCII 字节，构建在开工前就失败。`docker build` 不受影响，所以流程是 `docker build -t <project>-<service>` 三个镜像再 `up -d --no-build`。这条只对**这台机器**成立，Linux 部署机上 `up --build` 是好的——别把它当项目缺陷去"修"。另外 `chmod 600` 在 NTFS 上不可观测（Git Bash 里 `/tmp` 中的文件怎么设都报 `644`），`gen-secrets.sh` 里那行是给部署机写的。
