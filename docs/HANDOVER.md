@@ -9,7 +9,7 @@
 
 ## 1. 一句话现状
 
-后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；已读回执的两档接口（4.4.3）也已补齐；浏览器端（React + Vite）可与后端真聊、未读徽标会真的消，**成员管理（加人/移出/改角色/转让/邀请码/退群）也已能在界面上逐条点通**。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 模块、Electron 外壳、备份恢复演练与生产 secret 注入，**数据库与核心收发链路不再是阻塞项**。
+后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；**已读回执两侧打通**（4.4.3 两档接口 + 前端 chip 与名单）；浏览器端（React + Vite）可与后端真聊、未读徽标会真的消、**成员管理（加人/移出/改角色/转让/邀请码/退群）也能在界面上逐条点通**。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 模块、Electron 外壳、备份恢复演练与生产 secret 注入，**数据库与核心收发链路不再是阻塞项**。
 
 ---
 
@@ -18,14 +18,14 @@
 | 项 | 值 |
 |---|---|
 | 默认分支 | `main`（停在基线 `a322610`，尚未合并任何开发提交） |
-| 开发分支 | `feat/contracts-foundation`，**领先 `main` 39 个提交**（本文档自身的更新紧随其后，单独一个 docs 提交） |
-| 当前 HEAD | `645bc9f feat(web): member management the server already supported` |
+| 开发分支 | `feat/contracts-foundation`，**领先 `main` 42 个提交**（本文档自身的更新紧随其后，单独一个 docs 提交） |
+| 当前 HEAD | `b6736d2 feat(web): show read receipts, paying for each tier only when it is earned` |
 | 标签 | `m0-foundation` → `a322610`（仓库基线） |
 | 远端 | `origin` = `git@github.com:luo683/gongyouquan.git`，SSH，账号 `luo683` |
 | Git 身份 | `user.name=luo683`，`user.email=3012390263@qq.com` |
 | 提交约定 | `type(scope): summary`；一次提交只做一件可验证的事；不使用 `--force` |
 
-基线之后 39 个提交（旧→新）：
+基线之后 42 个提交（旧→新）：
 
 ```text
 3464abd feat(contracts): add shared transport schemas
@@ -67,6 +67,8 @@ f6d5637 feat(deploy): one command from empty volume to two people chatting
 3f7124c feat(server): read receipts in two tiers, per spec 4.4.3
 1ccf126 docs: bring the handover up to the receipts slice
 645bc9f feat(web): member management the server already supported
+7ac2b9c docs: record the member panel and the two things it cost to find
+b6736d2 feat(web): show read receipts, paying for each tier only when it is earned
 ```
 
 ---
@@ -150,7 +152,8 @@ GET    /groups/:gid/sync, /groups/:gid/sync-state    POST /groups/:gid/read
 - 发送与撤回走 socket ack；4.3.4 客户端状态机（`syncedSeq / pendingNew / eventBuffer`）抽成纯模块 `syncStore.ts`，有 9 个无浏览器单测
 - 中文文案全部由 `code` 在前端映射（`copy.ts`，`errorEnvelope.message` 只进日志）；`RATE_LIMITED` 把等待秒数拼进提示；角色名（群主/管理员/成员）也在 `copy.ts`
 - **成员管理面板**（房间右上角「成员 N」展开第三栏）：成员列表带角色徽标、按 ID 加人（可选角色）、移出群、设为/取消管理员、转让群主、邀请码生成（可选角色与次数）/列表/撤销、退出本群。移出与转让是**两步内联确认**（不用 `window.confirm`，理由同 `window.prompt`）。按钮显隐按调用者自己的角色收敛，而角色是从成员列表里找到自己推出来的——`GET /groups/:gid` 虽然返回 `myMembership`，但契约里没有这个字段的 schema
-- 侧栏内联「新建群」表单（不是 `window.prompt`）
+- **已读回执展示**：自己发的消息下挂一枚安静的「已读到 N/M」chip，滚进可见区才由 `IntersectionObserver` 拉聚合档（`detail=0`）并缓存，点开才付名单档（`detail=1`）；`read:updated` 到达时按**缓存里已有的档位**重取（一律用 0 会让正展开的名单凭空消失）。文案是「已读到」而非「已读」——4.4.4 要求，位点会追认。`totalMembers` 为 0 时整个 chip 不渲染。展示策略是说明书明确交给产品侧的，取舍见 `decisions/0008` 第五节
+- 侧栏内联「新建群」表单（不是 `window.prompt`）；建群后走 `chooseGroup` 而不是直接 `setSelected`，否则新房间是半开的（成员面板还显示上一个群的人、不加入 socket 房间、不收历史与补投）
 - 所有响应过 Zod schema；BIGINT id 全程字符串，前端无 `Number(id)`
 - **但 `api.ts` 本身一条测试都没有**：web 的 9 个用例只覆盖 `syncStore.ts`（纯模块，`environment: 'node'`，没有 jsdom）。所以下面坑 15 那个缺陷能一路活到有人在真浏览器里点一次才暴露——**闸门全绿不等于前端能用**
 - **刻意没有**「已登录用户凭邀请码入群」输入框：说明书 3.1 第 209 行把邀请码定义为**注册时**消耗，无任何接口让已有账号兑换，加了只会必然报错
@@ -185,11 +188,11 @@ socket handler 只注册一次，闭包里的 `selected` 会过期，所以用 `
 
 ## 5. 还没做到的（按重要性）
 
-1. **messages / sync 仍缺**：`typing:*` 与 `presence:updated`、`mention:new`、编辑/撤回窗口过期时 socket 侧对 `read:updated` 的推送。**已读回执的服务端两档接口已补齐**（`GET /groups/:gid/messages/:mid/receipts`，真库测试覆盖验收项 9），缺的只剩前端展示。
+1. **messages / sync 仍缺**：`typing:*` 与 `presence:updated`、`mention:new`、编辑/撤回窗口过期时 socket 侧对 `read:updated` 的推送。**已读回执已两侧打通**（服务端两档接口 + 真库测试覆盖验收项 9，前端 chip 与名单在真浏览器里验过实时刷新）。
 2. **整块未动的模块**：`tasks` / `files` / `search` / `ops`。其中 `ops` 含 `/hooks/*` 的幂等与聚合。
 3. **成员管理收尾**：离职转交的批量入口、`notification_prefs`、成员列表的 `includeRemoved` 查询参数。
 4. **改密接口**：`logout-all` 已实现，但目前只能由前端显式调用，没有「改密后强制全端下线」的入口。
-5. **浏览器端仍缺**：Electron 外壳（`apps/desktop`）、改密入口、已读回执展示、归档群入口。**成员管理界面已做**（列表 / 加人 / 移出 / 改角色 / 转让 / 邀请码增查撤 / 退群，真浏览器逐条点过），还差的是 `includeRemoved` 的历史成员视图与离职批量转交入口。
+5. **浏览器端仍缺**：Electron 外壳（`apps/desktop`）、改密入口、归档群入口。**成员管理界面与已读回执展示都已做**（真浏览器逐条点过），成员侧还差 `includeRemoved` 的历史成员视图与离职批量转交入口。
 6. **部署仍缺**：备份与恢复演练（说明书 §9 要求）、systemd 单元、`opsctl`、`/internal/metrics`、告警接入、生产版 secret 注入。
 7. **`CONTRACT_VERSION` 仍是注入的常量**（fallback `dev-nohash`），不是说明书 §7 第 4 条要求的「contracts 包 hash 前 8 位」；构建期没有计算步骤。
 8. **数据库侧只剩**：说明书 1685 行要求的 `EXPLAIN (ANALYZE, BUFFERS)` + 几千行样例数据的计划验证（见 `docs/decisions/0005`）。
@@ -292,7 +295,7 @@ PORT=3100 ... pnpm --filter @gongyouquan/server dev          # 自己的后端
 VITE_DEV_API_ORIGIN=http://127.0.0.1:3100 pnpm --filter @gongyouquan/web dev
 ```
 
-**验收遗留数据**（`create-admin` + 注册产生，纯新增，可直接复用或删）：群 `验收群` id `714`；账号 `boss`（id 771，口令 `Verify2026ok`，现为**管理员**）与 `mate`（id 772，口令 `MatePass2026`，现为**群主**）——两者是被转让过的，不是初始状态。另有一条 `BOOT-B4FA82BD6D47`（管理员 / 5 次）与一条已撤销的成员码。
+**验收遗留数据**（`create-admin` + 注册产生，纯新增，可直接复用或删）：群 `验收群` id `714`（两人）与 `独人群` id `715`（只有 mate，用来验 `totalMembers=0` 时不渲染 chip）；账号 `boss`（id 771，口令 `Verify2026ok`，现为**管理员**）与 `mate`（id 772，口令 `MatePass2026`，现为**群主**）——两者是被转让过的，不是初始状态。另有一条 `BOOT-B4FA82BD6D47`（管理员 / 5 次）与一条已撤销的成员码。两个账号都在，浏览器验收不必重新造。
 
 ---
 
@@ -301,8 +304,7 @@ VITE_DEV_API_ORIGIN=http://127.0.0.1:3100 pnpm --filter @gongyouquan/web dev
 1. 切到 Node 22（§9 路径直接可用），消掉 `Unsupported engine` 警告。
 2. 拍板 `docs/decisions/0005` 的六条——尤其**矛盾一**：说明书 4.2 断言回滚会留 seq 空洞、验收表第 2 项要求「构造回滚事务 → 后续 seq 有跳跃」，但真库证明当前 `alloc_group_seq` 写法做不到。`asOfSeq` 那条「基石」的验收怎么写，取决于这个决定。
 3. 拍板 `docs/decisions/0008` 一节：**`totalMembers` 到底排不排除发送者**。当前实现排除（全员读完显示 `n/n`），说明书验收项 9 只钉了分子。这改的是用户天天看的数字，要产品侧确认；若要改成含发送者，分子必须一起改，否则分数没有意义。
-4. 做**已读回执的前端展示**——服务端两档接口已齐且有真库测试，纯缺界面。注意 4.4.4 的措辞要求：说「已读到第 N 条」而不是「已读」，位点会追认。
-5. 再做 `typing:*` / `presence:updated` / `mention:new`，之后才往 `tasks / files / search / ops` 走。
+4. 再做 `typing:*` / `presence:updated` / `mention:new`，之后才往 `tasks / files / search / ops` 走。
 
 ---
 
