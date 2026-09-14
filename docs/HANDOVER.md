@@ -2,14 +2,14 @@
 
 - 编写日期：2026-09-14（重写，替换 2026-09-13 那份被 mojibake 损坏且已过期的版本）
 - 适用仓库：`E:\工友圈`（远端 `git@github.com:luo683/gongyouquan.git`）
-- 交接起点：`feat/contracts-foundation` 分支，`HEAD = 7d4f25b`，另有 1 处未提交的前端改动（见 §4 末）
+- 交接起点：`feat/contracts-foundation` 分支，`HEAD = 3f7124c`，工作区干净
 - 设计真源：`docs/specs/` 下三份说明书（**不要改原文**，矛盾与缺口走 `docs/decisions/`）
 
 ---
 
 ## 1. 一句话现状
 
-后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；浏览器端（React + Vite）可与后端真聊。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 模块、Electron 外壳、成员管理界面、备份恢复演练与生产 secret 注入，**数据库与核心收发链路不再是阻塞项**。
+后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；已读回执的两档接口（4.4.3）也已补齐，浏览器端（React + Vite）可与后端真聊且未读徽标会真的消。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 模块、Electron 外壳、成员管理界面、备份恢复演练与生产 secret 注入，**数据库与核心收发链路不再是阻塞项**。
 
 ---
 
@@ -18,14 +18,14 @@
 | 项 | 值 |
 |---|---|
 | 默认分支 | `main`（停在基线 `a322610`，尚未合并任何开发提交） |
-| 开发分支 | `feat/contracts-foundation`，**领先 `main` 35 个提交**，领先 `origin/feat/contracts-foundation` 25 个（即本地有 25 个提交未 push） |
-| 当前 HEAD | `7d4f25b feat(server): member management and invite codes, cell by cell from spec 3.4` |
+| 开发分支 | `feat/contracts-foundation`，**领先 `main` 38 个提交**，领先 `origin/feat/contracts-foundation` 28 个（即本地有 28 个提交未 push） |
+| 当前 HEAD | `3f7124c feat(server): read receipts in two tiers, per spec 4.4.3` |
 | 标签 | `m0-foundation` → `a322610`（仓库基线） |
 | 远端 | `origin` = `git@github.com:luo683/gongyouquan.git`，SSH，账号 `luo683` |
 | Git 身份 | `user.name=luo683`，`user.email=3012390263@qq.com` |
 | 提交约定 | `type(scope): summary`；一次提交只做一件可验证的事；不使用 `--force` |
 
-基线之后 35 个提交（旧→新）：
+基线之后 38 个提交（旧→新）：
 
 ```text
 3464abd feat(contracts): add shared transport schemas
@@ -62,6 +62,9 @@ f975363 chore(lint): give the repo a linter that can actually fail it
 f6d5637 feat(deploy): one command from empty volume to two people chatting
 7124e7d docs: mark rate limiting and the local deploy path as done, and name what is not
 7d4f25b feat(server): member management and invite codes, cell by cell from spec 3.4
+2ab03f8 fix(web): clear the unread badge when a room is opened
+543e432 docs: rewrite the handover against the tree as it actually stands
+3f7124c feat(server): read receipts in two tiers, per spec 4.4.3
 ```
 
 ---
@@ -79,7 +82,7 @@ f6d5637 feat(deploy): one command from empty volume to two people chatting
 │   ├── src/db/             连接池、迁移加载器、advisory-lock 幂等迁移
 │   ├── src/cli/create-admin.ts   首个账号引导（一次性）
 │   ├── src/runtime.ts      单进程装配 + Socket.IO 线
-│   └── tests/              17 个测试文件（含 integration/ 与 e2e/）
+│   └── tests/              19 个测试文件（含 integration/ 与 e2e/）
 ├── apps/web/               浏览器端（React + Vite + TS），复用 contracts schema
 │   └── src/{App.tsx,api.ts,copy.ts,syncStore.ts,main.tsx}
 ├── packages/contracts/     共享契约（Zod schema + 类型），前后端唯一真源
@@ -119,6 +122,7 @@ f6d5637 feat(deploy): one command from empty volume to two people chatting
 | **groups**：建群（创建者 owner）、群列表（`includeArchived` 默认 false）、详情（含 `myMembership`）、成员列表、改群信息 | `src/groups/routes.ts` |
 | **成员管理与邀请码**：加人（被移除者复活原行）、踢人 / 退出（owner 须先转让）、改角色、转让群主（同事务两行一起动）、邀请码增/查/撤销；code 只在创建响应出现一次 | `src/groups/members*.ts`、`member-routes.ts` |
 | **messages**：`alloc_group_seq` 同事务发号、`(sender_id, client_msg_id)` 幂等重发、历史分页、15 分钟编辑窗 / 2 分钟撤回窗（按 3.4 两行分开）、撤回留痕与 `/raw` 分级、每次变更同事务写 outbox；提交后经 bus 广播 `message:new/updated/deleted`（完整 DTO，非 diff） | `src/messages/`、`bus.ts` |
+| **已读回执**：`?detail=0` 只付 `{readCount, totalMembers}`，`detail=1` 才多一次 `users` JOIN 付名单（4.4.3 的分级）；两侧都排除发送者、都只算 `removed_at IS NULL` 的成员；`:gid` 与消息实际所属群不符时**先于**成员判定返回 404，不可用来探测别群消息 id；排除发送者用 `IS DISTINCT FROM` 而非 `<>`，因为系统消息 `sender_id` 为 NULL，`<> NULL` 会把所有行过滤掉、静默报 0/0。取舍见 `decisions/0008` | `src/messages/repository.ts` `receipts()` |
 | **sync**：`sync:hello` 水位（只报调用者真正在的群）、`sync:pull` 按当前状态补投（不重放事件）、`asOfSeq` 永不倒退、`read:update` 双向 `GREATEST` 位点 | `src/sync/` |
 | Socket.IO 线：`sync:hello / sync:pull / message:send / message:edit / message:delete / read:update`；ack 一律是契约载荷或 `{error:{code,message}}` | `src/runtime.ts` |
 | **首个账号引导**：`docker compose run --rm server node --import tsx src/cli/create-admin.ts` —— 一次性建 用户 + 系统群 + 邀请码并打印，登录自校验；重复运行拒绝；不在启动时自动执行 | `src/cli/create-admin.ts` |
@@ -133,6 +137,7 @@ PATCH  /groups/:gid
 POST   /groups/:gid/members            PATCH /groups/:gid/members/:uid   DELETE 同路径
 POST   /groups/:gid/invites            GET /groups/:gid/invites          DELETE /groups/:gid/invites/:iid
 POST   /groups/:gid/messages           GET /groups/:gid/messages
+GET    /groups/:gid/messages/:mid/receipts        (?detail=0|1，4.4.3 分级)
 PATCH  /messages/:mid                  DELETE /messages/:mid             GET /messages/:mid/raw
 GET    /groups/:gid/sync, /groups/:gid/sync-state    POST /groups/:gid/read
 ```
@@ -156,26 +161,27 @@ GET    /groups/:gid/sync, /groups/:gid/sync-state    POST /groups/:gid/read
 ```text
 pnpm lint        eslint .                          → 0 error（lint 已是真实闸门，不再是空转）
 pnpm typecheck   3 包全过
-pnpm test        contracts 29 + server 50 + web 9 = 88 通过，server 57 个真库用例 skip
-真库闸门         INTEGRATION_DATABASE_URL 设上后 server 107 全过（含 57 个真库 + e2e 双人聊天）
-合计             22 文件 / 145 用例，全绿
+pnpm test        contracts 30 + server 54 + web 9 = 93 通过，server 63 个真库用例 skip
+真库闸门         INTEGRATION_DATABASE_URL 设上后 server 117 全过（含 63 个真库 + e2e 双人聊天）
+合计             24 文件 / 156 用例，全绿
 ```
 
-### 未提交的前端改动（**接手第一步先处理它**）
+### 未读徽标与读位点（已提交 `2ab03f8`）
 
-`git status` 显示 `apps/web/src/App.tsx`、`apps/web/src/styles.css` 有未提交改动。这是上一轮没收尾的「让未读徽标真的会消」的工作，本次交接已把它补完整并验证通过，但**尚未 commit**：
+`api.read()` 一直存在但没人调用，未读数因此只增不减。现在两条路径都会推进位点：
 
-1. 新增 `selectedRef`（镜像 `selected` 状态）——socket 的 `message:new` handler 只注册一次，闭包读 `selected` 会过期，必须用 ref 判断「消息是否落在当前正打开的群」，是则推进读位点。
-2. `chooseGroup` 里**同步**写 `selectedRef.current`（避免 await 期间到达的消息被拿旧群判断），并把补投 `pull` 改为 `await`，完成后调用 `advanceRead(groupId, syncedSeq)` —— **打开一个群即清掉它的未读徽标**。
-3. `createGroup` 从 `window.prompt` 改成侧栏内联表单（自动化浏览器驱动不了模态框，且无法回显服务端拒绝原因）。
+1. 打开一个群：`chooseGroup` 里 `await` 完补投后调用 `advanceRead(groupId, syncedSeq)`，**进群即清掉该群徽标**。
+2. 群正打开时有新消息到达：`message:new` handler 判断消息落在当前群，是则再推一次。
 
-`advanceRead` 服务端是 `GREATEST` 单调的，过期调用无害；客户端用 `lastSentRead` ref 去重，避免重复 emit。验证：`pnpm --filter @gongyouquan/web typecheck / lint / test` 全过。**接手后请把这处改动 commit 掉**（建议 `fix(web): clear the unread badge when a room is opened`），否则会一直挂在工作区。
+socket handler 只注册一次，闭包里的 `selected` 会过期，所以用 `selectedRef` 镜像；`chooseGroup` **同步**写这个 ref，避免 `await` 期间到达的消息被拿去和刚离开的群比较。`advanceRead` 服务端是 `GREATEST` 单调的，过期调用无害；客户端另有 `lastSentRead` ref 去重，避免重复 emit。
+
+`createGroup` 同时从 `window.prompt` 改成侧栏内联表单：模态框自动化浏览器驱动不了，也没法回显服务端拒绝名称的原因。
 
 ---
 
 ## 5. 还没做到的（按重要性）
 
-1. **messages / sync 仍缺**：已读回执 `GET /messages/:mid/receipts`（4.4.3 的 detail 分级，**路由尚未注册**）、`typing:*` 与 `presence:updated`、`mention:new`、编辑/撤回窗口过期时 socket 侧对 `read:updated` 的推送。（`/messages/:mid/raw` 的 HTTP 路由**已存在**，旧文档说缺是过期的。）
+1. **messages / sync 仍缺**：`typing:*` 与 `presence:updated`、`mention:new`、编辑/撤回窗口过期时 socket 侧对 `read:updated` 的推送。**已读回执的服务端两档接口已补齐**（`GET /groups/:gid/messages/:mid/receipts`，真库测试覆盖验收项 9），缺的只剩前端展示。
 2. **整块未动的模块**：`tasks` / `files` / `search` / `ops`。其中 `ops` 含 `/hooks/*` 的幂等与聚合。
 3. **成员管理收尾**：离职转交的批量入口、`notification_prefs`、成员列表的 `includeRemoved` 查询参数。
 4. **改密接口**：`logout-all` 已实现，但目前只能由前端显式调用，没有「改密后强制全端下线」的入口。
@@ -236,7 +242,7 @@ pnpm --filter @gongyouquan/server dev
 
 ## 8. 说明书里的矛盾与取舍（`docs/decisions/`）
 
-0002-0007 多为 `open` 状态：**取舍已实现，但说明书本身还没修订**。接手后若与产品/需求方对齐，应回头关掉它们。
+0002-0008 多为 `open` 状态：**取舍已实现，但说明书本身还没修订**。接手后若与产品/需求方对齐，应回头关掉它们。
 
 | 文件 | 关键内容 |
 |---|---|
@@ -247,6 +253,7 @@ pnpm --filter @gongyouquan/server dev
 | `0005-real-database-findings.md` | 真库首跑暴露 6 条：**回滚不产生 seq 空洞（推翻说明书 4.2 与验收表第 2 项）**、未读不排除撤回消息、预览与未读对 `system` 口径不一致、硬删群连撤回留痕一起清掉、`files.uploader_id` 无级联、1685 行计划验证仍未做 |
 | `0006-messages-sync-contract-gaps.md` | messages 缺 `updated_at`（已补迁移 0002）、WS 与 HTTP 的 send ack 不一致、`clientMsgId` 该不该收成 UUID、`asOfSeq` 定义会让客户端位点倒退、本轮只发得出 text/system |
 | `0007-rate-limiting-tradeoffs.md` | 限流落地取舍 |
+| `0008-receipts-semantics.md` | 已读回执四处规格没写死：`totalMembers` 是否排除发送者（验收项 9 只钉了分子）、`:gid` 与消息不符时的响应、系统消息 `sender_id` 为 NULL 的排除写法、撤回消息还能不能查回执 |
 
 几个**已拍死、改之前先看 decision** 的行为：
 
@@ -254,6 +261,7 @@ pnpm --filter @gongyouquan/server dev
 - 非成员读群详情/成员列表：返回 `404 NOT_FOUND`，不暴露群存在性；写操作才用 `403 FORBIDDEN_*`。
 - `GET /groups` 的 `includeArchived` 默认 **false**（说明书没写，这是我们的选择）。
 - 登录失败统一 `AUTH_INVALID_CREDENTIALS`，不区分用户名不存在与密码错误。
+- 已读回执：`readCount` 与 `totalMembers` **都**排除发送者（说明书只钉了分子，见 `0008` 一节）；`:gid` 与消息实际所属群不符时，先于成员判定返回 `404`，不用 `403`。
 
 ---
 
@@ -277,12 +285,12 @@ pnpm --filter @gongyouquan/server dev
 
 ## 10. 接手后建议的第一步
 
-1. **把 §4 末那处未提交的前端改动 commit 掉**（已验证全绿，别让它一直挂在工作区）。
-2. 切到 Node 22（§9 路径直接可用），消掉 `Unsupported engine` 警告。
-3. 拍板 `docs/decisions/0005` 的六条——尤其**矛盾一**：说明书 4.2 断言回滚会留 seq 空洞、验收表第 2 项要求「构造回滚事务 → 后续 seq 有跳跃」，但真库证明当前 `alloc_group_seq` 写法做不到。`asOfSeq` 那条「基石」的验收怎么写，取决于这个决定。
-4. 补 `messages` 的已读回执路由 `GET /messages/:mid/receipts`（4.4.3），再做 `typing/presence/mention`。
+1. 切到 Node 22（§9 路径直接可用），消掉 `Unsupported engine` 警告。
+2. 拍板 `docs/decisions/0005` 的六条——尤其**矛盾一**：说明书 4.2 断言回滚会留 seq 空洞、验收表第 2 项要求「构造回滚事务 → 后续 seq 有跳跃」，但真库证明当前 `alloc_group_seq` 写法做不到。`asOfSeq` 那条「基石」的验收怎么写，取决于这个决定。
+3. 拍板 `docs/decisions/0008` 一节：**`totalMembers` 到底排不排除发送者**。当前实现排除（全员读完显示 `n/n`），说明书验收项 9 只钉了分子。这改的是用户天天看的数字，要产品侧确认；若要改成含发送者，分子必须一起改，否则分数没有意义。
+4. 做**已读回执的前端展示**——服务端两档接口已齐且有真库测试，纯缺界面。注意 4.4.4 的措辞要求：说「已读到第 N 条」而不是「已读」，位点会追认。
 5. 做**成员管理界面**——服务端接口（加人/踢人/改角色/转让/邀请码）已齐且有真库测试，纯缺前端。
-6. 之后才往 `tasks / files / search / ops` 走。
+6. 再做 `typing:*` / `presence:updated` / `mention:new`，之后才往 `tasks / files / search / ops` 走。
 
 ---
 
@@ -300,4 +308,5 @@ pnpm --filter @gongyouquan/server dev
 10. **`revoked_reason` 是字符串字面量，不是列名。** 单会话登出的 SQL 曾写成 `revoked_reason = logout`（缺引号），单测全绿因为跑在内存假仓储上。教训：**「切片已在真库上跑过」不等于每条 SQL 都被跑过**。
 11. **一条 SELECT 拼字符串时，别忘了它到底有没有 `WHERE`。**
 12. **`group_members` 主键是 `(group_id, user_id)`**：被踢成员复活只能 `UPDATE` 原行，再 `INSERT` 直接撞主键。
-13. **socket handler 只注册一次**，任何随用户操作变化的状态（如「当前打开哪个群」）都要走 ref 镜像，不能在 handler 里读 state 闭包——会过期。本次未提交改动里的 `selectedRef` 就是为此。
+13. **socket handler 只注册一次**，任何随用户操作变化的状态（如「当前打开哪个群」）都要走 ref 镜像，不能在 handler 里读 state 闭包——会过期。`App.tsx` 里的 `selectedRef` 就是为此。
+14. **可空列不能用 `<>` 比较。** `user_id <> $2` 在 `$2` 为 NULL 时结果是 NULL 而不是 true，整条 WHERE 把所有行过滤光——不报错，只返回一个看起来合理的 0。系统消息的 `sender_id` 就是可空的。用 `IS DISTINCT FROM`。第 10 条的教训在这里再次成立：**「切片在真库上跑过」不等于每条 SQL 都被跑过**，这条是靠把 `IS DISTINCT FROM` 改回 `<>`、确认对应用例变红才验证测试真的咬得住。
