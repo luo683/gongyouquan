@@ -143,6 +143,13 @@ services:
       AGE_RECIPIENT_FILE: '/etc/age/recipient.pub'
       # 空 = 没有异地。backup-once.sh 对「没有异地」的默认行为是**直接失败**，
       # 所以下面那行 ALLOW_LOCAL_ONLY 是这条栈唯一的例外声明。
+      #
+      # 手册 8.1 的立场没有例外（「本地副本不是备份策略」），而 3.2 的
+      # `RESTIC_REPOSITORY: ${RESTIC_REPOSITORY}` 没有默认值——照 8.1 硬实现，
+      # 一台还没配对象存储的机器会拿到一个反复重启、红得和「备份真坏了」一样的
+      # 容器。ALLOW_LOCAL_ONLY 因此是**手册里没有的变量**，把硬规则换成显式例外。
+      # 配上 restic 仓库之后请把 `:-1` 这个默认删掉：它每多留一天，8.1 就一天没有生效。
+      # 全文见 docs/decisions/0013 第三节。
       RESTIC_REPOSITORY: '${RESTIC_REPOSITORY:-}'
       RESTIC_PASSWORD: '${RESTIC_PASSWORD:-}'
       ALLOW_LOCAL_ONLY: '${ALLOW_LOCAL_ONLY:-1}'
@@ -169,13 +176,20 @@ services:
       # backup-once.sh taking its documented "no pubkey, skip, never write
       # plaintext" path. A missing file inside a mounted directory is the safe
       # shape of the same mistake.
+      #
+      # Both mounts exist because the ops manual's own 3.2 service definition
+      # cannot satisfy its 4.3 requirement: `env_file: [.env]` injects values into
+      # the process and leaves no readable file behind, so as written the container
+      # has neither the .env nor a place for the key. See docs/decisions/0013 一.
       - ./age:/etc/age:ro
     security_opt:
       - 'no-new-privileges:true'
     # 手册 2.4 给 backup 的是 100m。这里给 256m，因为超出的部分正是这个容器最
     # 不能省的两件事：`pg_dump -Z6` 的压缩缓冲与 restic 的上传。被 cgroup 杀掉是
     # 无预警的，而它杀的是备份——下一个需要恢复的人只会发现副本停在三天前。
-    # 上线前按真实数据量重测这个数（见 docs/HANDOVER.md §5 第 6 条）。
+    # 上线前按真实数据量重测这个数（**目前没有实测依据**：本轮的 dump 来自一个只有
+    # 3 条消息的开发库，压缩与上传都远未触顶，所以别把这个数当结论抄进部署清单）。
+    # 取舍的全文见 docs/decisions/0013 第二节，待办在 docs/HANDOVER.md §5 第 6 条。
     mem_limit: '256m'
     cpus: 0.5
     healthcheck:
