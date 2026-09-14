@@ -30,9 +30,18 @@ echo "[backup-loop] 调度表 $CRONTAB:" >&2
 cat "$CRONTAB" >&2
 
 # 启动时先自检一次工具链，而不是等到凌晨三点才发现 pg_dump 不在。
+#
+# 每个工具各自报版本，而不是一套 `$TOOL --version`：restic 没有 `--version` 这个
+# 选项（它是 `restic version` 子命令），统一拼法会让这一行日志变成
+# `restic: unknown flag: --version`——而这份日志正是「工具链到底在不在」的证据，
+# 它不该长得像装坏了。
 for TOOL in pg_dump pg_restore restic age; do
+  case "$TOOL" in
+    restic) VERSION_CMD='restic version' ;;
+    *)      VERSION_CMD="$TOOL --version" ;;
+  esac
   if command -v "$TOOL" > /dev/null 2>&1; then
-    echo "[backup-loop] $TOOL: $($TOOL --version 2>&1 | head -1)" >&2
+    echo "[backup-loop] $TOOL: $($VERSION_CMD 2>&1 | head -1)" >&2
   else
     # restic 与 age 缺失只在未配置异地时才是致命的，backup-once.sh 会自己判断，
     # 所以这里只警告；pg_dump 缺失则直接失败，因为没有它这个容器毫无意义。

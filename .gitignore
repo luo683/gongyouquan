@@ -35,6 +35,10 @@ backups/
 *.p12
 *.pfx
 secrets/
+# The backup container mounts this as /etc/age. Only recipient.pub is supposed to
+# live here, but ignoring the whole directory is the only rule that survives
+# someone dropping the private half in it "temporarily, just to test the decrypt".
+infra/deploy/age/
 
 # OS and editor files
 .DS_Store

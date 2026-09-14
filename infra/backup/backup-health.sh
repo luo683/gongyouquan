@@ -1,0 +1,40 @@
+#!/bin/sh
+# 容器健康检查 —— 巡检项 20（备份新鲜度）在这个栈里的落点。
+#
+# 为什么要有这个：backup-once.sh 失败时本该调 notify-alert.sh，而那个脚本属于还没
+# 开始的 `ops` 模块，所以此刻**没有任何东西会因为有备份失败而说话**。一个每天
+# 03:00 跑、失败了只往 /var/log/backup.log 里写一行的容器，和「有备份」看起来一模
+# 一样——这正是手册 8.1 巡检项 21 说的「虚假的安全感」。把它挂成 Docker 的
+# healthcheck，`docker compose ps` 与任何看容器状态的东西就会显出红色。
+#
+# POSIX sh：这个镜像里只有 busybox 的 /bin/sh 与 stat。
+#
+# 阈值与 backup-loop.sh 的补跑阈值同源（26 小时 = 93600 秒）。巡检项 20 是
+# 26h 警告 / 50h 严重；这里取警告那一档作为「不健康」，因为不健康只是让人看见，
+# 不触发任何自动处置。
+
+set -eu
+
+DIR="${BACKUP_DIR:-/backups}"
+MAX_AGE="${BACKUP_MAX_AGE_SECONDS:-93600}"
+MARKER="$DIR/last_success.json"
+
+if [ ! -f "$MARKER" ]; then
+  printf '没有任何成功备份：%s 不存在（首次备份还没跑完，或者每次都失败）\n' "$MARKER"
+  exit 1
+fi
+
+AGE=$(( $(date +%s) - $(stat -c%Y "$MARKER") ))
+# 把异地模式一起报出来。巡检项 20 只看新鲜度，而「异地=local-only」的备份在服务器
+# 报废的那天等于没有备份——这正是本文件开头说的虚假的安全感。
+# 不因为 local-only 就返回非 0：还没配 restic 的装机第一天会拿到一个永久红色的容器，
+# 而一个总是红的灯没有人读。让它可见，不让它失败。
+OFFSITE=$(sed -n 's/.*"offsite": *"\([^"]*\)".*/\1/p' "$MARKER" 2>/dev/null || true)
+[ -n "$OFFSITE" ] || OFFSITE='?'
+
+if [ "$AGE" -gt "$MAX_AGE" ]; then
+  printf '上次备份已是 %s 小时前，超过 %s 小时（异地=%s）\n' "$((AGE / 3600))" "$((MAX_AGE / 3600))" "$OFFSITE"
+  exit 1
+fi
+
+printf 'ok：上次备份 %s 小时前，异地=%s\n' "$((AGE / 3600))" "$OFFSITE"

@@ -67,8 +67,15 @@ createdb "$TARGET_DB"
 
 log "pg_restore（计时，它是 RTO 的一部分）"
 T_RESTORE_START=$(date +%s)
-pg_restore -d "$TARGET_DB" -j 2 --no-owner --no-privileges "$DUMP_FILE" > /dev/null 2>&1 \
-  || fail "pg_restore 失败"
+RESTORE_LOG="${RESTORE_LOG:-/tmp/restore-drill.pgrestore.log}"
+# 错误必须留在能被看到的地方：这个脚本的常见执行场景是「服务器上已经没了，
+# 对着异地副本做一次演练」，那时 pg_restore 的报错文本就是唯一线索。
+if ! pg_restore -d "$TARGET_DB" -j 2 --no-owner --no-privileges \
+     "$DUMP_FILE" > "$RESTORE_LOG" 2>&1; then
+  log "pg_restore 失败，输出末尾："
+  tail -n 25 "$RESTORE_LOG" >&2 || true
+  fail "pg_restore 失败（完整输出见 $RESTORE_LOG）"
+fi
 T_RESTORE_END=$(date +%s)
 RESTORE_SECONDS=$((T_RESTORE_END - T_RESTORE_START))
 ok "数据恢复完成，用时 ${RESTORE_SECONDS}s"
@@ -96,10 +103,15 @@ log "  用户=$USERS 群=$GROUPS 成员=$MEMBERS 消息=$MESSAGES 提及=$MENTIO
   || fail "用户数 $USERS 少于期望的 $EXPECT_MIN_USERS —— 恢复不完整"
 ok "行数达到期望下限"
 
-log "验收 3.3：最新 10 条消息存在且正文非空（未被截断）"
-EMPTY_BODY=$(psql_run "SELECT count(*) FROM (SELECT body FROM messages ORDER BY id DESC LIMIT 10) t WHERE t.body IS NULL OR t.body = ''")
-[ "$EMPTY_BODY" = "0" ] || fail "最新 10 条消息里有 $EMPTY_BODY 条正文为空 —— dump 可能被截断"
-ok "最新消息正文完整"
+log "验收 3.3：最新 10 条**文本**消息正文非空"
+# 只看 kind='text'：body 在 0001_init.sql:150 是可空的，image/file/system/task_card
+# 本来就没有正文。不限定的话，第一条图片就把演练判成失败——而一个总是指控错了的
+# 演练会在下次真的出事时没人当真，那比没有演练更糟。
+# 另外，截断其实丢的是整行而不是把正文变成 NULL；这一条真正防的是「恢复出来的文本
+# 消息不知为何空了」，而那一件事在验收 3.2 的行数里也会体现。
+EMPTY_BODY=$(psql_run "SELECT count(*) FROM (SELECT body FROM messages WHERE kind = 'text' AND deleted_at IS NULL ORDER BY id DESC LIMIT 10) t WHERE t.body IS NULL OR t.body = ''")
+[ "$EMPTY_BODY" = "0" ] || fail "最新 10 条文本消息里有 $EMPTY_BODY 条正文为空"
+ok "最新文本消息正文完整"
 
 log "验收 3.4：引用完整性（不应有悬挂的行）"
 DANGLING_ATTACH=$(psql_run "SELECT count(*) FROM message_attachments a LEFT JOIN messages m ON m.id = a.message_id WHERE m.id IS NULL")
@@ -115,9 +127,11 @@ MIGRATIONS=$(psql_run "SELECT count(*) FROM schema_migrations")
 [ "$MIGRATIONS" -ge 1 ] || fail "schema_migrations 为空 —— 应用启动时会重跑迁移，可能与已恢复的结构冲突"
 ok "schema_migrations 含 $MIGRATIONS 条记录"
 
-log "验收 3.6：序列与分配器函数存在（alloc_group_seq 是发号的唯一入口）"
-psql_run "SELECT alloc_group_seq((SELECT id FROM groups ORDER BY id LIMIT 1))" > /dev/null 2>&1 \
-  || log "警告：alloc_group_seq 调用失败（可能没有群，或函数缺失）—— 需人工确认"
+log "验收 3.6：分配器函数存在且可用（alloc_group_seq 是发号的唯一入口）"
+# 这里必须 fail 而不是警告：整个脚本的退出码就是演练结论，「需人工确认」的那一条
+# 没有人工在读。函数缺失意味着恢复出来的库发不出新消息，而验收 3.1~3.5 全都会通过。
+psql_run "SELECT alloc_group_seq((SELECT id FROM groups ORDER BY id LIMIT 1))" > /dev/null \
+  || fail "alloc_group_seq 调用失败 —— 要么函数没恢复出来，要么库里一个群都没有"
 ok "分配器可调用"
 
 # ── 4. 结论 ──

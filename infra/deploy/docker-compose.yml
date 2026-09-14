@@ -119,6 +119,77 @@ services:
       server:
         condition: service_healthy
 
+  # 手册 3.2 的 backup 服务：调度 infra/backup/ 里的三个脚本。在此之前那两个脚本
+  # 只是仓库里的文件——没有任何东西跑它们。
+  backup:
+    build:
+      context: ../..
+      dockerfile: infra/backup/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # The service name, and the same three names the db was created with.
+      PG_HOST: 'db'
+      POSTGRES_USER: '${POSTGRES_USER}'
+      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
+      POSTGRES_DB: '${POSTGRES_DB}'
+      BACKUP_DIR: '/backups'
+      UPLOADS_DIR: '/data/uploads'
+      # 手册 4.3：`.env` 要 age 加密后随备份一起带走。这个 compose 文件所在的
+      # 目录就是 .env 所在的目录，所以路径与手册一致。没有 age 公钥时
+      # backup-once.sh 会跳过它并打一行警告——**不会明文落盘**。
+      ENV_FILE: '/opt/chat/.env'
+      AGE_RECIPIENT_FILE: '/etc/age/recipient.pub'
+      # 空 = 没有异地。backup-once.sh 对「没有异地」的默认行为是**直接失败**，
+      # 所以下面那行 ALLOW_LOCAL_ONLY 是这条栈唯一的例外声明。
+      RESTIC_REPOSITORY: '${RESTIC_REPOSITORY:-}'
+      RESTIC_PASSWORD: '${RESTIC_PASSWORD:-}'
+      ALLOW_LOCAL_ONLY: '${ALLOW_LOCAL_ONLY:-1}'
+      BACKUP_HOUR: '${BACKUP_HOUR:-3}'
+      BACKUP_MINUTE: '${BACKUP_MINUTE:-0}'
+    volumes:
+      - uploads:/data/uploads:ro
+      - backups:/backups
+      # Read-only, and it has to be: this container's job is copying secrets,
+      # not rotating them, and a writable mount means a bug in a backup script
+      # could rewrite the credentials the whole stack authenticates with.
+      # If the secrets were exported into the environment instead of living in
+      # this file, Docker would create an empty *directory* here instead - the
+      # script notices and logs "不存在，跳过", which is the safe direction.
+      - ./.env:/opt/chat/.env:ro
+      # Only the **public** half of the age keypair belongs here. Generate it off
+      # the box (`age-keygen -o ~/gyq.age.key`, then `age-keygen -y ~/gyq.age.key`
+      # into this directory as recipient.pub); a private key next to the ciphertext
+      # it decrypts is not encryption.
+      #
+      # The directory is mounted rather than recipient.pub itself on purpose:
+      # Docker answers a bind mount of a *missing file* by creating an empty
+      # directory at the target, and then `age` fails on a directory instead of
+      # backup-once.sh taking its documented "no pubkey, skip, never write
+      # plaintext" path. A missing file inside a mounted directory is the safe
+      # shape of the same mistake.
+      - ./age:/etc/age:ro
+    security_opt:
+      - 'no-new-privileges:true'
+    # 手册 2.4 给 backup 的是 100m。这里给 256m，因为超出的部分正是这个容器最
+    # 不能省的两件事：`pg_dump -Z6` 的压缩缓冲与 restic 的上传。被 cgroup 杀掉是
+    # 无预警的，而它杀的是备份——下一个需要恢复的人只会发现副本停在三天前。
+    # 上线前按真实数据量重测这个数（见 docs/HANDOVER.md §5 第 6 条）。
+    mem_limit: '256m'
+    cpus: 0.5
+    healthcheck:
+      # Not "is the process alive" - supercronic is always alive. This is
+      # 巡检项 20: how long since a backup actually *succeeded*.
+      test: ['CMD', '/usr/local/bin/backup-health.sh']
+      interval: 10m
+      timeout: 10s
+      retries: 3
+      # The first backup runs at container start, so an absent marker during
+      # this window is expected rather than a failure.
+      start_period: 5m
+
 volumes:
   dbdata:
   uploads:
+  backups:
