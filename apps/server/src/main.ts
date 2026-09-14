@@ -58,6 +58,13 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
       limiter,
     }),
     groups: createGroupsService(groupsRepo, { limiter }),
+    /**
+     * Presence broadcasts room by room (line 758 forbids a global one), so it
+     * needs the caller's group list. Read through the same repository the guards
+     * use rather than a second membership query that could drift. Archived groups
+     * are included: they stay readable and their members still see them.
+     */
+    getPresenceGroups: async (userId) => (await groupsRepo.listGroups(userId, true)).map((group) => group.id),
     members: createMembersService(createMembersRepository(database), groupsRepo),
     // One shared bus: the write path publishes here after COMMIT and buildApp
     // attaches the Socket.IO emitter to it, so nothing in src/messages needs to

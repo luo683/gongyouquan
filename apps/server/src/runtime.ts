@@ -8,8 +8,10 @@ import {
   readUpdateSchema,
   syncHelloSchema,
   syncPullSchema,
+  typingSignalSchema,
   type MessageDto,
 } from '@gongyouquan/contracts';
+import { createPresence, createPresenceSweep, type Presence, type PresenceSweep } from './presence.js';
 import { registerAuthRoutes, type AuthRouteService } from './auth/routes.js';
 import { createAuthenticator } from './http/auth.js';
 import { HttpError } from './http/errors.js';
@@ -42,17 +44,40 @@ export type RuntimeOptions = {
   bus?: MessageBus;
   /** Shared by routes and services; absent only in tests that pin no policy. */
   limiter?: RateLimiter;
+  /**
+   * Which group rooms a presence change is broadcast to. Optional: the socket
+   * tests stand up no database, and presence is a broadcast with nothing to
+   * read back, so an absent resolver simply means no presence events.
+   */
+  getPresenceGroups?: (userId: string) => Promise<string[]>;
+  /**
+   * Spec 4.6's leak probe. The ops module that should receive this does not
+   * exist yet (see decisions/0007 section four), so the default is a log line -
+   * which is honest about there being nowhere better for it to go.
+   */
+  onPresenceDrift?: (drift: { tracked: number; engine: number }) => void;
+  /** 30 seconds per spec 4.6; overridable so a test does not have to wait. */
+  presenceSweepIntervalMs?: number;
 };
 
 export type Runtime = {
   app: FastifyInstance;
   io: SocketIOServer;
+  /** Exposed for 4.7's `presenceMapSize` gauge and for tests. */
+  presence: Presence;
   close: () => Promise<void>;
 };
 
 type AuthenticatedSocket = Socket & {
   data: {
     userId: string;
+    /**
+     * Cached at connect so a disconnect can broadcast offline without awaiting a
+     * database query during teardown. Membership can change mid-session; presence
+     * is best-effort enough that a stale room list is acceptable, and the
+     * alternative is a query on the path where the connection just died.
+     */
+    groupIds?: string[];
   };
 };
 
@@ -94,6 +119,59 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
   if (options.sync) await registerSyncRoutes(app, options.sync, createAuthenticator(options.jwtSecret));
   if (options.members) await registerMemberRoutes(app, options.members, createAuthenticator(options.jwtSecret));
 
+  const presence: Presence = createPresence();
+
+  /**
+   * Resolved once per socket and cached on it. The cache is what lets the
+   * disconnect path broadcast offline without awaiting a database query at the
+   * exact moment a connection died - and membership changing mid-session is a
+   * staleness presence can tolerate, being best-effort by nature.
+   */
+  async function groupsOf(socket: AuthenticatedSocket): Promise<string[]> {
+    const cached = socket.data.groupIds;
+    if (cached) return cached;
+    const resolved = options.getPresenceGroups ? await options.getPresenceGroups(socket.data.userId) : [];
+    socket.data.groupIds = resolved;
+    return resolved;
+  }
+
+  /**
+   * Room by room, never global. Line 758 forbids a full broadcast outright, and
+   * who is online in one group is nobody else's business.
+   */
+  function broadcastPresence(targetUserId: string, groupIds: string[], online: boolean): void {
+    const at = new Date().toISOString();
+    for (const groupId of groupIds) {
+      io.to('group:' + groupId).emit('presence:updated', { groupId, userId: targetUserId, online, at });
+    }
+  }
+
+  const sweep: PresenceSweep = createPresenceSweep(
+    {
+      engineClients: () => io.engine.clientsCount,
+      isSocketAlive: (socketId) => io.sockets.sockets.has(socketId),
+    },
+    presence,
+    {
+      intervalMs: options.presenceSweepIntervalMs,
+      onDrift:
+        options.onPresenceDrift ??
+        ((drift) => console.error('presence drift: tracking more sockets than the engine has', drift)),
+      /**
+       * A pruned user's socket is gone, so there is no socket.data to read the
+       * group list from. This is the one place presence pays for a query, and it
+       * only runs for connections that died without firing `disconnect`.
+       */
+      onOffline: (userId) => {
+        if (!options.getPresenceGroups) return;
+        void options
+          .getPresenceGroups(userId)
+          .then((groupIds) => broadcastPresence(userId, groupIds, false))
+          .catch((error: unknown) => console.error('presence offline broadcast failed', error));
+      },
+    },
+  );
+
   io.use(async (socket, next) => {
     try {
       const userId = await authenticate(socket, options.jwtSecret);
@@ -108,6 +186,48 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
     const socket = rawSocket as AuthenticatedSocket;
     const userId = socket.data.userId;
     socket.join('user:' + userId);
+
+    /**
+     * Joined before anything awaits, mirroring the rule 4.6 states for leaving:
+     * the map has to be correct first, and the broadcast is a consequence of the
+     * transition rather than something racing it. Only the first of a user's
+     * sockets announces them - a second device connecting is not a new arrival.
+     */
+    const cameOnline = presence.join(userId, socket.id);
+    void groupsOf(socket).then((groupIds) => {
+      if (cameOnline) broadcastPresence(userId, groupIds, true);
+    });
+
+    socket.on('disconnect', () => {
+      // Synchronous first line, per spec 4.6. Everything after this may await.
+      const wentOffline = presence.leave(userId, socket.id);
+      if (!wentOffline) return;
+      const cached = socket.data.groupIds;
+      if (cached) broadcastPresence(userId, cached, false);
+      else void groupsOf(socket).then((groupIds) => broadcastPresence(userId, groupIds, false));
+    });
+
+    /**
+     * `typing:start` / `typing:stop`: no ack, best effort, never persisted (line
+     * 739). Relayed to the room minus the sender, who has no use for an echo of
+     * their own keystrokes.
+     *
+     * Gated on room membership rather than on a database query. Rooms are only
+     * joined by sync:hello, sync:pull and message:send, all of which have already
+     * checked membership, so this costs nothing - and it is not decorative:
+     * `socket.to(room)` delivers to a room whether or not the sender is in it, so
+     * without this check a stranger could put "someone is typing" into any group
+     * they liked, under any userId they liked.
+     */
+    for (const signal of ['typing:start', 'typing:stop'] as const) {
+      socket.on(signal, (payload: unknown) => {
+        const parsed = typingSignalSchema.safeParse(payload);
+        if (!parsed.success) return;
+        const room = 'group:' + parsed.data.groupId;
+        if (!socket.rooms.has(room)) return;
+        socket.to(room).emit(signal, { groupId: parsed.data.groupId, userId });
+      });
+    }
 
     /**
      * Every handler answers with either the contract payload or a wsErrorPayload,
@@ -221,6 +341,7 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
   let closePromise: Promise<void> | undefined;
   const close = (): Promise<void> => {
     closePromise ??= (async () => {
+      sweep.stop();
       detach?.();
       await closeSocketServer(io);
       try {
@@ -234,5 +355,5 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
     return closePromise;
   };
 
-  return { app, io, close };
+  return { app, io, presence, close };
 }

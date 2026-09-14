@@ -347,6 +347,25 @@ export type SyncStateDto = z.infer<typeof syncStateDtoSchema>;
 
 export const groupIdPayloadSchema = z.object({ groupId: entityIdSchema });
 
+/**
+ * `typing:start` / `typing:stop` from client to server (说明书 739 行)：只有 groupId，
+ * **没有 ack**，尽力而为、可丢、不落库。
+ */
+export const typingSignalSchema = groupIdPayloadSchema;
+export type TypingSignal = z.infer<typeof typingSignalSchema>;
+
+/**
+ * The relayed form. 说明书的 Server→Client 表（743-756 行）**根本没有 typing 这一行**——
+ * 它定义了客户端怎么发，却没说对端怎么收。事件名沿用客户端那两个，载荷补上 `userId`：
+ * 没有它，收到的人无从知道是谁在输入，而发送者自己的 id 对发送者毫无意义。
+ * 这个缺口登记在 `docs/decisions/0009`。
+ */
+export const typingEventSchema = z.object({
+  groupId: entityIdSchema,
+  userId: entityIdSchema,
+});
+export type TypingEvent = z.infer<typeof typingEventSchema>;
+
 export const presenceUpdatedEventSchema = z.object({
   groupId: entityIdSchema,
   userId: entityIdSchema,

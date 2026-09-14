@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GroupSummaryDto, InviteDto, MemberDto, MessageDto, MessageReceiptsDto, ReadUpdatedEvent } from '@gongyouquan/contracts';
+import type { GroupSummaryDto, InviteDto, MemberDto, MessageDto, MessageReceiptsDto, ReadUpdatedEvent, TypingEvent } from '@gongyouquan/contracts';
 import { io, type Socket } from 'socket.io-client';
 import { api, ApiError, clearSession, hasSession, setSession, type Tokens } from './api.js';
 import { copyFor, retryAfterSeconds, roleLabel, stateLabel } from './copy.js';
@@ -74,6 +74,11 @@ export function App() {
   /** Keyed by message AND tier, so a click for names is not swallowed by an aggregate fetch in flight. */
   const inFlight = useRef<Set<string>>(new Set());
   const streamRef = useRef<HTMLOListElement | null>(null);
+  /** userId -> true, for the room on screen only. */
+  const [typers, setTypers] = useState<Record<string, true>>({});
+  const typingTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const typingIdle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTypingStart = useRef(0);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<Socket | null>(null);
   const statesRef = useRef<Record<string, GroupState>>({});
@@ -142,6 +147,16 @@ export function App() {
         if (event.groupId !== selectedRef.current) return;
         for (const messageId of Object.keys(receiptsRef.current)) fetchReceipt(event.groupId, messageId);
       });
+      // Only the room on screen is drawn, so a signal for another group is
+      // dropped rather than allowed to mark someone typing where nobody can see.
+      socket.on('typing:start', (event: TypingEvent) => {
+        if (event.groupId !== selectedRef.current) return;
+        markTyping(event.userId);
+      });
+      socket.on('typing:stop', (event: TypingEvent) => {
+        if (event.groupId !== selectedRef.current) return;
+        clearTyping(event.userId);
+      });
       socket.on('sync:ready', (ready: { groups: Array<{ groupId: string; lastSeq: number }> }) => {
         for (const group of ready.groups) {
           const local = statesRef.current[group.groupId] ?? emptyGroup(0);
@@ -187,6 +202,9 @@ export function App() {
   }
 
   async function chooseGroup(groupId: string): Promise<void> {
+    // Captured before the mirror moves: the outgoing typing:stop belongs to the
+    // room being left, and selectedRef is about to point somewhere else.
+    const leaving = selectedRef.current;
     setSelected(groupId);
     // Set the mirror synchronously: the useEffect only runs after render, and a
     // message:new landing mid-await would otherwise be judged against the room we
@@ -207,6 +225,10 @@ export function App() {
     setReceipts({});
     setOpenReceipt(null);
     inFlight.current.clear();
+    // Typists belong to the room being left, and an idle stop armed for it would
+    // otherwise fire against the new one.
+    clearAllTyping();
+    stopTyping(leaving);
     const socket = socketRef.current;
     if (!socket) return;
     const local = statesRef.current[groupId] ?? emptyGroup(0);
@@ -263,6 +285,9 @@ export function App() {
     const socket = socketRef.current;
     if (!body || !selected || !socket || !tokens) return;
     setDraft('');
+    // The message is the end of the sentence; leaving the indicator up after it
+    // lands would be a lie the peers can see.
+    stopTyping();
     // clientMsgId is generated once per composition and reused by the server-side
     // idempotency key if we ever retry; the socket ack is what turns it into a
     // real message, so nothing is rendered as sent before then.
@@ -449,6 +474,79 @@ export function App() {
     return () => observer.disconnect();
   }, [selected, streams]);
 
+  /**
+   * A peer who vanishes mid-sentence never sends typing:stop, and spec line 739
+   * says these signals are best effort and may simply be dropped. So every start
+   * arms its own expiry - without one, "正在输入" would stick to the room forever
+   * and nobody could tell it apart from someone genuinely still typing.
+   *
+   * Refs and the functional setState only: this is called from a socket handler
+   * registered once, so reading state here would see the values from mount.
+   */
+  const TYPING_TTL_MS = 6_000;
+  function clearTyping(userId: string): void {
+    clearTimeout(typingTimers.current[userId]);
+    delete typingTimers.current[userId];
+    setTypers((previous) => {
+      if (!previous[userId]) return previous;
+      const next = { ...previous };
+      delete next[userId];
+      return next;
+    });
+  }
+
+  function markTyping(userId: string): void {
+    clearTimeout(typingTimers.current[userId]);
+    typingTimers.current[userId] = setTimeout(() => clearTyping(userId), TYPING_TTL_MS);
+    setTypers((previous) => (previous[userId] ? previous : { ...previous, [userId]: true }));
+  }
+
+  function clearAllTyping(): void {
+    for (const userId of Object.keys(typingTimers.current)) clearTyping(userId);
+  }
+
+  /**
+   * Throttled to one start every few seconds, because emitting per keystroke would
+   * put a packet on the wire for every letter and re-render every peer for each
+   * one. The idle timeout closes over the group id captured now: by the time it
+   * fires, `selected` may well be a different room, and a stop aimed at the wrong
+   * room would leave this one showing a typist who has gone.
+   */
+  const TYPING_THROTTLE_MS = 3_000;
+  function announceTyping(): void {
+    const socket = socketRef.current;
+    const groupId = selected;
+    if (!socket?.connected || !groupId) return;
+    const now = Date.now();
+    if (now - lastTypingStart.current > TYPING_THROTTLE_MS) {
+      lastTypingStart.current = now;
+      socket.emit('typing:start', { groupId });
+    }
+    if (typingIdle.current) clearTimeout(typingIdle.current);
+    typingIdle.current = setTimeout(() => {
+      typingIdle.current = null;
+      lastTypingStart.current = 0;
+      if (socketRef.current?.connected) socketRef.current.emit('typing:stop', { groupId });
+    }, TYPING_THROTTLE_MS);
+  }
+
+  /**
+   * Called on send, where the message arriving is the end of the sentence, and on
+   * leaving a room. The group is a parameter because chooseGroup has already
+   * repointed selectedRef by the time it wants to cancel: without it the stop
+   * would go to the room being entered, which the user never typed in.
+   */
+  function stopTyping(groupId?: string | null): void {
+    if (typingIdle.current) {
+      clearTimeout(typingIdle.current);
+      typingIdle.current = null;
+    }
+    lastTypingStart.current = 0;
+    const socket = socketRef.current;
+    const target = groupId ?? selectedRef.current;
+    if (socket?.connected && target) socket.emit('typing:stop', { groupId: target });
+  }
+
   async function revoke(message: MessageDto): Promise<void> {
     const socket = socketRef.current;
     if (!socket) return;
@@ -465,6 +563,9 @@ export function App() {
   useEffect(() => {
     return () => {
       socketRef.current?.close();
+      for (const timer of Object.values(typingTimers.current)) clearTimeout(timer);
+      typingTimers.current = {};
+      if (typingIdle.current) clearTimeout(typingIdle.current);
       clearSession();
     };
   }, []);
@@ -479,6 +580,17 @@ export function App() {
   const roster = useMemo(
     () => Object.fromEntries(members.map((member) => [member.userId, member.displayName])),
     [members],
+  );
+  /**
+   * Names rather than ids, resolved through the same roster the bubbles use. Empty
+   * string means nobody, so the footer can test it directly.
+   */
+  const typingNames = useMemo(
+    () =>
+      Object.keys(typers)
+        .map((userId) => roster[userId] ?? `工友 ${userId}`)
+        .join('、'),
+    [typers, roster],
   );
   const myRole = members.find((member) => member.userId === tokens?.user.id)?.role ?? null;
   const isOwner = myRole === 'owner';
@@ -710,7 +822,10 @@ export function App() {
             >
               <input
                 value={draft}
-                onChange={(event) => setDraft(event.target.value)}
+                onChange={(event) => {
+                  setDraft(event.target.value);
+                  announceTyping();
+                }}
                 placeholder={current.summary?.isArchived ? '群已归档，只能看' : '说点什么…'}
                 disabled={current.summary?.isArchived === true || !connected}
               />
@@ -719,6 +834,7 @@ export function App() {
               </button>
             </form>
             <footer className="sub">
+              {typingNames ? <span className="typing">{typingNames} 正在输入…</span> : null}
               共 {current.messages.length} 条 · {stateLabel(current.messages[current.messages.length - 1] ?? { deletedAt: null, editedAt: null })}
             </footer>
           </>

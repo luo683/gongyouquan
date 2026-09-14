@@ -13,16 +13,29 @@ function onceSocket<T>(socket: Socket, event: string): Promise<T> {
   });
 }
 
-async function token(overrides: Record<string, unknown> = {}) {
+async function token(subject = 'user-1', overrides: Record<string, unknown> = {}) {
   return new SignJWT({ ...overrides, sid: 'session-1' })
     .setProtectedHeader({ alg: 'HS256' })
-    .setSubject('user-1')
+    .setSubject(subject)
     .setIssuedAt()
     .setExpirationTime('5m')
     .sign(secret);
 }
 
-async function startRuntime() {
+/**
+ * Records everything received on an event. These tests assert on what does NOT
+ * arrive as much as on what does - an echo to the sender, a second online
+ * announcement for a second device, a typing relay to a socket that never joined
+ * the room - and an absence is only provable against a listener that was attached
+ * before the thing happened.
+ */
+function record<T>(socket: Socket, event: string): T[] {
+  const seen: T[] = [];
+  socket.on(event, (payload: unknown) => seen.push(payload as T));
+  return seen;
+}
+
+async function startRuntime(extra: Partial<Parameters<typeof buildApp>[0]> = {}) {
   const runtime = await buildApp({
     jwtSecret: secret,
     contractVersion: 'test-contract',
@@ -32,12 +45,32 @@ async function startRuntime() {
     }),
     getGroupSyncState: async ({ groupId }) =>
       groupId === 'group-1' ? { lastSeq: 12 } : null,
+    ...extra,
   });
   await runtime.app.listen({ host: '127.0.0.1', port: 0 });
   runtimes.push(runtime);
   const address = runtime.app.server.address();
   if (!address || typeof address === 'string') throw new Error('server did not bind');
   return { runtime, url: `http://127.0.0.1:${address.port}` };
+}
+
+async function connect(url: string, subject?: string): Promise<Socket> {
+  const client = createClient(url, { auth: { token: await token(subject) }, reconnection: false });
+  clients.push(client);
+  await onceSocket<void>(client, 'connect');
+  return client;
+}
+
+/** sync:hello is what joins the socket to group rooms, so typing has somewhere to go. */
+async function joinRoom(client: Socket, groupId = 'group-1'): Promise<void> {
+  await new Promise<unknown>((resolve) => {
+    client.emit('sync:hello', { groups: [{ groupId, syncedSeq: 0 }] }, resolve);
+  });
+}
+
+/** Give the server a turn to flush broadcasts before asserting on what arrived. */
+function settle(ms = 60): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 afterEach(async () => {
@@ -93,5 +126,78 @@ describe('server runtime', () => {
     await disconnected;
 
     expect(client.connected).toBe(false);
+  });
+
+  it('relays typing to the room but not back to the sender', async () => {
+    const { url } = await startRuntime();
+    const sender = await connect(url, 'user-1');
+    const peer = await connect(url, 'user-2');
+    await joinRoom(sender);
+    await joinRoom(peer);
+
+    const atPeer = record<{ groupId: string; userId: string }>(peer, 'typing:start');
+    const atSender = record<unknown>(sender, 'typing:start');
+
+    sender.emit('typing:start', { groupId: 'group-1' });
+    await settle();
+
+    // The payload carries the sender's id, which is the part the spec's
+    // client-to-server row cannot express and its server-to-client row omits.
+    expect(atPeer).toEqual([{ groupId: 'group-1', userId: 'user-1' }]);
+    expect(atSender).toEqual([]);
+  });
+
+  it('drops typing from a socket that never joined the room', async () => {
+    const { url } = await startRuntime();
+    const member = await connect(url, 'user-2');
+    await joinRoom(member);
+    // Authenticated, but it never sent sync:hello, so it is in no group room.
+    const stranger = await connect(url, 'user-1');
+
+    const seen = record<unknown>(member, 'typing:start');
+    stranger.emit('typing:start', { groupId: 'group-1' });
+    await settle();
+
+    /**
+     * `socket.to(room)` delivers to a room whether or not the sender is in it, so
+     * without the room check this arrives - and a stranger could put "someone is
+     * typing" into any group they liked, attributed to any userId they liked.
+     */
+    expect(seen).toEqual([]);
+  });
+
+  it('announces presence once per user, not once per socket', async () => {
+    const { url } = await startRuntime({ getPresenceGroups: async () => ['group-1'] });
+    const watcher = await connect(url, 'user-2');
+    await joinRoom(watcher);
+    // Let the watcher's own arrival flush past before listening, or it records
+    // itself and every count below is off by one.
+    await settle();
+    const events = record<{ groupId: string; userId: string; online: boolean; at: string }>(
+      watcher,
+      'presence:updated',
+    );
+
+    const desktop = await connect(url, 'user-1');
+    await settle();
+    expect(events).toEqual([
+      { groupId: 'group-1', userId: 'user-1', online: true, at: expect.any(String) },
+    ]);
+
+    // Their browser connects. Same person, so the group hears nothing.
+    const browser = await connect(url, 'user-1');
+    await settle();
+    expect(events.filter((event) => event.online)).toHaveLength(1);
+
+    // Closing the tab while the desktop is open must not say they left.
+    desktop.close();
+    await settle();
+    expect(events.filter((event) => !event.online)).toHaveLength(0);
+
+    browser.close();
+    await settle();
+    expect(events.filter((event) => !event.online)).toEqual([
+      { groupId: 'group-1', userId: 'user-1', online: false, at: expect.any(String) },
+    ]);
   });
 });

@@ -71,3 +71,5 @@ select { padding: .4rem; border: 1px solid #d4d6db; border-radius: 7px; font: in
 .link.quiet { color: #9a9aa2; font-size: .7rem; }
 .link.quiet:hover { color: #2f6feb; }
 .readers { color: #6b6b73; font-size: .7rem; }
+/* Inside the muted footer, so a little colour is what makes it noticeable at all. */
+.typing { color: #2f6feb; margin-right: .5rem; }
