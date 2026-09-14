@@ -2,11 +2,15 @@ import {
   errorEnvelopeSchema,
   groupDtoSchema,
   groupSummaryDtoSchema,
+  inviteDtoSchema,
+  memberDtoSchema,
   messageDtoSchema,
   messageSendResultSchema,
   inviteCreatedDtoSchema,
   type GroupDto,
   type GroupSummaryDto,
+  type InviteDto,
+  type MemberDto,
   type MessageDto,
   type MessageSendResult,
 } from '@gongyouquan/contracts';
@@ -64,7 +68,17 @@ async function call<T>(
   path: string,
   init: { method: string; body?: unknown; schema: { parse(value: unknown): T } },
 ): Promise<T> {
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  const headers: Record<string, string> = {};
+  /**
+   * The content-type goes on only when there is a body to describe. A bodyless
+   * DELETE that claims application/json is rejected by Fastify with 400
+   * FST_ERR_CTP_EMPTY_JSON_BODY, and that response is not our error envelope - so
+   * it maps to no code and reaches the user as a generic failure for a write that
+   * never ran. Found by driving 移出群 in a real browser; api.revoke had the same
+   * defect from the day it was written and nobody noticed, because message
+   * revocation travels over the socket instead.
+   */
+  if (init.body !== undefined) headers['content-type'] = 'application/json';
   if (accessToken) headers.authorization = `Bearer ${accessToken}`;
 
   const response = await fetch(`${BASE}${path}`, {
@@ -121,28 +135,62 @@ export const api = {
    * on it (only lastMessagePreview has senderDisplayName). So the roster is the
    * client's only source for "who said this", and it is fetched once per group
    * rather than guessed at.
+   *
+   * It is also where the client learns its own role: GET /groups/:gid does return
+   * a myMembership, but no contracts schema describes that field, and the caller is
+   * in this list anyway.
    */
-  members: async (groupId: string): Promise<Array<{ userId: string; displayName: string; role: string }>> => {
+  members: async (groupId: string): Promise<MemberDto[]> => {
     const rows = await call<unknown>(`/groups/${groupId}/members`, {
       method: 'GET',
       schema: { parse: (value: unknown): unknown[] => value as unknown[] },
     });
-    return (Array.isArray(rows) ? rows : []).map((row) => {
-      const member = row as { userId: string; displayName: string; role: string };
-      return { userId: member.userId, displayName: member.displayName, role: member.role };
-    });
+    return (Array.isArray(rows) ? rows : []).map((row) => memberDtoSchema.parse(row));
   },
+
+  /** POST /groups/:gid/members - adds someone who already has an account. New people arrive by invite code instead. */
+  addMember: (groupId: string, input: { userId: string; role?: 'admin' | 'member' }) =>
+    call<MemberDto>(`/groups/${groupId}/members`, { method: 'POST', body: input, schema: memberDtoSchema }),
+
+  /**
+   * PATCH /groups/:gid/members/:uid is two mutually exclusive operations sharing
+   * one endpoint: appointing or revoking an admin, or handing the group over. The
+   * server rejects a body that names both and one that names neither, so the union
+   * here is what keeps the client from constructing either.
+   */
+  updateMember: (
+    groupId: string,
+    userId: string,
+    input: { role: 'admin' | 'member' } | { transferOwnership: true },
+  ) => call<MemberDto>(`/groups/${groupId}/members/${userId}`, { method: 'PATCH', body: input, schema: memberDtoSchema }),
+
+  /** DELETE /groups/:gid/members/:uid - 204. Pointing it at yourself is 退出群, and an owner is refused until they transfer. */
+  removeMember: (groupId: string, userId: string) =>
+    call<void>(`/groups/${groupId}/members/${userId}`, { method: 'DELETE', schema: { parse: (value: unknown) => value } }),
 
   /** POST /groups/:gid/invites - the code comes back once and is not listed again. */
   createInvite: (
     groupId: string,
-    input: { role?: 'owner' | 'admin' | 'member'; maxUses?: number; expiresInHours?: number },
+    input: { role?: 'admin' | 'member'; maxUses?: number; expiresInHours?: number },
   ) =>
     call<InviteCreated>(`/groups/${groupId}/invites`, {
       method: 'POST',
       body: input,
       schema: inviteCreatedDtoSchema,
     }),
+
+  /** GET /groups/:gid/invites - deliberately carries no plaintext code, only usedCount and revocation state. */
+  invites: async (groupId: string): Promise<InviteDto[]> => {
+    const rows = await call<unknown>(`/groups/${groupId}/invites`, {
+      method: 'GET',
+      schema: { parse: (value: unknown): unknown[] => value as unknown[] },
+    });
+    return (Array.isArray(rows) ? rows : []).map((row) => inviteDtoSchema.parse(row));
+  },
+
+  /** DELETE /groups/:gid/invites/:iid - 204, and idempotent: revoking an already-revoked code is not an error. */
+  revokeInvite: (groupId: string, inviteId: string) =>
+    call<void>(`/groups/${groupId}/invites/${inviteId}`, { method: 'DELETE', schema: { parse: (value: unknown) => value } }),
 
   history: async (
     groupId: string,

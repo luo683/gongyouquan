@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GroupSummaryDto, MessageDto } from '@gongyouquan/contracts';
+import type { GroupSummaryDto, InviteDto, MemberDto, MessageDto } from '@gongyouquan/contracts';
 import { io, type Socket } from 'socket.io-client';
 import { api, ApiError, clearSession, hasSession, setSession, type Tokens } from './api.js';
-import { copyFor, retryAfterSeconds, stateLabel } from './copy.js';
+import { copyFor, retryAfterSeconds, roleLabel, stateLabel } from './copy.js';
 import { applyEvent, applyNew, applyPage, emptyGroup, orderedMessages, type GroupState } from './syncStore.js';
 
 /**
@@ -21,6 +21,13 @@ export function App() {
   const [inviteCode, setInviteCode] = useState('');
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [notice, setNotice] = useState('');
+  /**
+   * A second channel for the member panel. Verified in a real browser: a refusal
+   * from 加人 rendered in the left sidebar while the user was looking at the panel
+   * on the right, which is indistinguishable from the click doing nothing. Panel
+   * actions report here so the message lands where the click happened.
+   */
+  const [panelNotice, setPanelNotice] = useState('');
   const [busy, setBusy] = useState(false);
 
   const groups = useState<GroupSummaryDto[]>([]);
@@ -28,14 +35,28 @@ export function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [streams, setStreams] = useState<Record<string, GroupState>>({});
   /**
-   * userId -> displayName, per group, from GET /groups/:gid/members. MessageDto
-   * deliberately has no sender name, so this is the only honest way to label a
-   * bubble; without it the UI falls back to printing the id, which is what it
-   * did before and looked like a made-up name.
+   * The member list for the group on screen, straight from GET /groups/:gid/members.
+   * MessageDto deliberately has no sender name, so this is the only honest way to
+   * label a bubble - and it is also where the client learns its own role, since no
+   * contracts schema describes the myMembership that GET /groups/:gid returns.
    */
-  const [roster, setRoster] = useState<Record<string, string>>({});
+  const [members, setMembers] = useState<MemberDto[]>([]);
+  const [invites, setInvites] = useState<InviteDto[]>([]);
+  const [peopleOpen, setPeopleOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [newGroupName, setNewGroupName] = useState('');
+  const [addUserId, setAddUserId] = useState('');
+  const [addRole, setAddRole] = useState<'admin' | 'member'>('member');
+  const [inviteRole, setInviteRole] = useState<'admin' | 'member'>('member');
+  const [inviteMaxUses, setInviteMaxUses] = useState('10');
+  /** The plaintext code, shown once: the list endpoint stops returning it. */
+  const [mintedCode, setMintedCode] = useState<string | null>(null);
+  /**
+   * Two-step confirmation for the two actions that are hard to undo. Not
+   * window.confirm: a modal dialog cannot be driven by an automated browser, which
+   * is the same reason createGroup gave up window.prompt.
+   */
+  const [confirming, setConfirming] = useState<{ kind: 'remove' | 'transfer'; userId: string } | null>(null);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<Socket | null>(null);
   const statesRef = useRef<Record<string, GroupState>>({});
@@ -144,17 +165,20 @@ export function App() {
     // just left.
     selectedRef.current = groupId;
     setNotice('');
+    // Panel state belongs to the room we are leaving. Clearing it first is what
+    // stops an invite code minted for one group from being displayed against another.
+    setMembers([]);
+    setInvites([]);
+    setMintedCode(null);
+    setConfirming(null);
+    setAddUserId('');
+    setPanelNotice('');
     const socket = socketRef.current;
     if (!socket) return;
     const local = statesRef.current[groupId] ?? emptyGroup(0);
-    // Names come from the roster, not from the message: MessageDto has senderId
+    // Names come from the member list, not from the message: MessageDto has senderId
     // only. Fetched before the history so the first paint is already labelled.
-    try {
-      const people = await api.members(groupId);
-      setRoster(Object.fromEntries(people.map((person) => [person.userId, person.displayName])));
-    } catch (error) {
-      if (error instanceof ApiError) setNotice(error.message);
-    }
+    await reloadPeople(groupId);
     // 4.3.2: history first for context, then the replay for anything missed.
     try {
       const page = await api.history(groupId);
@@ -169,6 +193,35 @@ export function App() {
     // monotonic server-side (GREATEST), so this only ever moves the badge forward.
     const synced = statesRef.current[groupId]?.syncedSeq ?? 0;
     if (synced > 0) await advanceRead(groupId, synced);
+  }
+
+  /**
+   * Re-read after every mutation rather than patching the list locally: the server
+   * is the authority on who holds which role, and a local patch drifts the moment
+   * anyone else in the room changes it.
+   */
+  async function reloadPeople(groupId: string, report: (text: string) => void = setNotice): Promise<void> {
+    let people: MemberDto[];
+    try {
+      people = await api.members(groupId);
+    } catch (error) {
+      if (error instanceof ApiError) report(error.message);
+      return;
+    }
+    setMembers(people);
+    // The invite list is owner/admin only. A plain member would get 403, which is
+    // the endpoint working correctly, so it is not worth a red banner.
+    const mine = people.find((person) => person.userId === tokens?.user.id)?.role;
+    if (mine !== 'owner' && mine !== 'admin') {
+      setInvites([]);
+      return;
+    }
+    try {
+      setInvites(await api.invites(groupId));
+    } catch (error) {
+      setInvites([]);
+      if (error instanceof ApiError) report(error.message);
+    }
   }
 
   async function send(): Promise<void> {
@@ -217,17 +270,67 @@ export function App() {
   }
 
   /**
+   * One funnel for every member mutation: clear the stale error, do the write,
+   * re-read the list, refresh the sidebar's member counts, and show the server's
+   * own reason if it refused. Hiding a button the caller has no role for is
+   * politeness - the server's answer is the actual gate, and spec 8.1 puts the
+   * wording the user reads in copy.ts, keyed off the code it sends.
+   */
+  async function mutate(action: (groupId: string) => Promise<unknown>): Promise<void> {
+    const groupId = selected;
+    if (!groupId) return;
+    setPanelNotice('');
+    try {
+      await action(groupId);
+      await reloadPeople(groupId, setPanelNotice);
+      await refreshGroups();
+    } catch (error) {
+      setPanelNotice(error instanceof ApiError ? error.message : '操作失败，请稍后再试');
+    } finally {
+      setConfirming(null);
+    }
+  }
+
+  /**
    * Codes are minted here and shown once, because the list endpoint stops
    * returning them after creation - so a leaked roster read is not a leaked
    * join link, and there is no way to recover one from the UI.
    */
   async function mintInvite(): Promise<void> {
-    if (!selected) return;
+    const maxUses = Number.parseInt(inviteMaxUses, 10);
+    await mutate(async (groupId) => {
+      const invite = await api.createInvite(groupId, {
+        role: inviteRole,
+        // An empty or nonsensical count means "unlimited", which the server models
+        // as maxUses: null rather than as a number it has to validate.
+        ...(Number.isInteger(maxUses) && maxUses >= 1 ? { maxUses } : {}),
+      });
+      setMintedCode(invite.code);
+    });
+  }
+
+  /**
+   * Leaving deliberately does not go through mutate(): the caller has just stopped
+   * being a member, so the re-read would answer 403 and paint a successful exit as
+   * a failure. Drop the room and let the sidebar show the shorter list.
+   */
+  async function leaveGroup(): Promise<void> {
+    const groupId = selected;
+    const me = tokens?.user.id;
+    if (!groupId || !me) return;
+    setPanelNotice('');
     try {
-      const invite = await api.createInvite(selected, { role: 'member', maxUses: 10 });
-      setNotice(`邀请码 ${invite.code}（可用 10 次，只显示这一次）`);
+      await api.removeMember(groupId, me);
+      setSelected(null);
+      selectedRef.current = null;
+      setMembers([]);
+      setInvites([]);
+      setPeopleOpen(false);
+      await refreshGroups();
     } catch (error) {
-      setNotice(error instanceof ApiError ? error.message : '生成邀请码失败');
+      // An owner is refused here until they hand the group over; that reason comes
+      // from the server and is the whole point of not swallowing it.
+      setPanelNotice(error instanceof ApiError ? error.message : '退群失败');
     }
   }
 
@@ -284,6 +387,41 @@ export function App() {
     return { state, summary, messages: orderedMessages(state) };
   }, [selected, groupList, streams]);
 
+  const roster = useMemo(
+    () => Object.fromEntries(members.map((member) => [member.userId, member.displayName])),
+    [members],
+  );
+  const myRole = members.find((member) => member.userId === tokens?.user.id)?.role ?? null;
+  const isOwner = myRole === 'owner';
+  const canInvite = isOwner || myRole === 'admin';
+  /**
+   * Archived groups stay readable and refuse every write with 409 (decision 0004),
+   * so the panel keeps showing the list and drops the buttons rather than offering
+   * a form the server has already decided to reject.
+   */
+  const archived = current?.summary?.isArchived === true;
+  /** An owner cannot walk out of their own group; they have to hand it over first. */
+  const canLeave = !archived && myRole !== null && !isOwner;
+
+  /**
+   * Spec 3.4's 踢人 row: owner ✓, admin ✓ but never against the owner or a fellow
+   * admin, member ✗. The caller's own row is excluded because 退出群 is a different
+   * row of the same table with different rules.
+   *
+   * These predicates only decide which buttons to render. The server re-checks all
+   * of it, and its answer is what reaches the user when they disagree.
+   */
+  function canRemove(member: MemberDto): boolean {
+    if (archived || member.role === 'owner' || member.userId === tokens?.user.id) return false;
+    if (isOwner) return true;
+    return myRole === 'admin' && member.role === 'member';
+  }
+
+  /** 改角色 and 转让群主 are both owner-only, and never against oneself or the owner row. */
+  function canManage(member: MemberDto): boolean {
+    return !archived && isOwner && member.role !== 'owner' && member.userId !== tokens?.user.id;
+  }
+
   if (phase === 'signed-out') {
     return (
       <main className="wrap">
@@ -327,7 +465,7 @@ export function App() {
   }
 
   return (
-    <main className="two">
+    <main className={peopleOpen && current ? 'two wide' : 'two'}>
       <aside className="side">
         <header>
           <strong>{tokens?.user.displayName}</strong>
@@ -388,10 +526,18 @@ export function App() {
               <span className="sub">
                 {current.summary ? `${current.summary.memberCount} 人` : ''} · 已同步到 seq {current.state.syncedSeq}
               </span>
-              {/* Only owners and admins can mint one; the server answers 403 otherwise,
-                  and the client does not pretend to know the role better than it does. */}
-              <button type="button" className="link" onClick={() => void mintInvite()}>
-                生成邀请码
+              <button
+                type="button"
+                className="link"
+                aria-expanded={peopleOpen}
+                onClick={() => setPeopleOpen((open) => !open)}
+              >
+                {/* The summary's count, not members.length: the list is still in
+                    flight when this first renders, and a failed fetch would leave
+                    the toggle saying 0 next to a sidebar saying 2 人. */}
+                {peopleOpen
+                  ? '收起成员'
+                  : `成员 ${current.summary?.memberCount ?? members.length}`}
               </button>
             </header>
             <ol className="stream">
@@ -442,6 +588,210 @@ export function App() {
           </>
         )}
       </section>
+
+      {peopleOpen && current ? (
+        <aside className="people">
+          <header>
+            <h3>成员 · {members.length}</h3>
+            <span className="sub">{myRole ? `你是${roleLabel(myRole)}` : '你不在成员列表里'}</span>
+          </header>
+          {panelNotice ? (
+            <p className="warn" role="status">
+              {panelNotice}
+            </p>
+          ) : null}
+
+          <ul className="members">
+            {members.map((member) => {
+              const isSelf = member.userId === tokens?.user.id;
+              const askedRemove = confirming?.kind === 'remove' && confirming.userId === member.userId;
+              const askedTransfer = confirming?.kind === 'transfer' && confirming.userId === member.userId;
+              return (
+                <li key={member.userId} className="member">
+                  <span className="name">
+                    {member.displayName}
+                    {isSelf ? <em className="tag">我</em> : null}
+                    <em className="tag role">{roleLabel(member.role)}</em>
+                  </span>
+                  <span className="acts">
+                    {canManage(member) ? (
+                      <button
+                        type="button"
+                        className="link"
+                        onClick={() =>
+                          void mutate((groupId) =>
+                            api.updateMember(groupId, member.userId, {
+                              role: member.role === 'admin' ? 'member' : 'admin',
+                            }),
+                          )
+                        }
+                      >
+                        {member.role === 'admin' ? '取消管理员' : '设为管理员'}
+                      </button>
+                    ) : null}
+                    {canRemove(member) ? (
+                      askedRemove ? (
+                        <>
+                          <button
+                            type="button"
+                            className="link danger"
+                            onClick={() => void mutate((groupId) => api.removeMember(groupId, member.userId))}
+                          >
+                            确认移出
+                          </button>
+                          <button type="button" className="link" onClick={() => setConfirming(null)}>
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="link"
+                          onClick={() => setConfirming({ kind: 'remove', userId: member.userId })}
+                        >
+                          移出群
+                        </button>
+                      )
+                    ) : null}
+                    {canManage(member) ? (
+                      askedTransfer ? (
+                        <>
+                          <button
+                            type="button"
+                            className="link danger"
+                            onClick={() =>
+                              void mutate((groupId) => api.updateMember(groupId, member.userId, { transferOwnership: true }))
+                            }
+                          >
+                            确认转让
+                          </button>
+                          <button type="button" className="link" onClick={() => setConfirming(null)}>
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="link"
+                          onClick={() => setConfirming({ kind: 'transfer', userId: member.userId })}
+                        >
+                          转让群主
+                        </button>
+                      )
+                    ) : null}
+                  </span>
+                </li>
+              );
+            })}
+            {members.length === 0 ? <li className="empty">没读到成员列表。</li> : null}
+          </ul>
+
+          {canInvite && !archived ? (
+            <form
+              className="addmember"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void mutate(async (groupId) => {
+                  await api.addMember(groupId, { userId: addUserId.trim(), role: addRole });
+                  setAddUserId('');
+                });
+              }}
+            >
+              <input
+                value={addUserId}
+                onChange={(event) => setAddUserId(event.target.value)}
+                placeholder="用户 ID（暂无通讯录接口）"
+                aria-label="要加入的用户 ID"
+              />
+              <select
+                value={addRole}
+                onChange={(event) => setAddRole(event.target.value as 'admin' | 'member')}
+                aria-label="加入时的角色"
+              >
+                <option value="member">成员</option>
+                <option value="admin">管理员</option>
+              </select>
+              <button type="submit" disabled={addUserId.trim().length === 0}>
+                加人
+              </button>
+            </form>
+          ) : null}
+
+          {canInvite ? (
+            <section className="invites">
+              <h4>邀请码</h4>
+              {mintedCode ? (
+                <p className="minted">
+                  <code>{mintedCode}</code>
+                  <span className="sub">只显示这一次，列表里不再回显</span>
+                </p>
+              ) : null}
+              {!archived ? (
+                <form
+                  className="mint"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void mintInvite();
+                  }}
+                >
+                  <select
+                    value={inviteRole}
+                    onChange={(event) => setInviteRole(event.target.value as 'admin' | 'member')}
+                    aria-label="邀请码对应的角色"
+                  >
+                    <option value="member">成员</option>
+                    <option value="admin">管理员</option>
+                  </select>
+                  <input
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={inviteMaxUses}
+                    onChange={(event) => setInviteMaxUses(event.target.value)}
+                    aria-label="可用次数，留空为不限"
+                    placeholder="次数"
+                  />
+                  <button type="submit">生成</button>
+                </form>
+              ) : null}
+              <ul>
+                {invites.map((invite) => (
+                  <li key={invite.id}>
+                    <span className="tag role">{roleLabel(invite.role)}</span>
+                    <span className="sub">
+                      已用 {invite.usedCount}
+                      {invite.maxUses === null ? '' : `/${invite.maxUses}`}
+                    </span>
+                    <span className="sub">
+                      {invite.expiresAt ? `${new Date(invite.expiresAt).toLocaleDateString('zh-CN')} 到期` : '长期有效'}
+                    </span>
+                    {invite.revokedAt ? (
+                      <span className="tag">已撤销</span>
+                    ) : !archived ? (
+                      <button
+                        type="button"
+                        className="link"
+                        onClick={() => void mutate((groupId) => api.revokeInvite(groupId, invite.id))}
+                      >
+                        撤销
+                      </button>
+                    ) : null}
+                  </li>
+                ))}
+                {invites.length === 0 ? <li className="empty">还没有邀请码。</li> : null}
+              </ul>
+            </section>
+          ) : null}
+
+          {canLeave ? (
+            <button type="button" className="link danger leave" onClick={() => void leaveGroup()}>
+              退出这个群
+            </button>
+          ) : null}
+          {isOwner && !archived ? <p className="sub">群主不能直接退群，要先把群转让出去。</p> : null}
+          {archived ? <p className="sub">群已归档，只能看，改不动。</p> : null}
+        </aside>
+      ) : null}
     </main>
   );
 }

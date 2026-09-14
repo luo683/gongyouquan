@@ -50,3 +50,17 @@ export function stateLabel(message: { deletedAt: string | null; editedAt: string
   if (message.editedAt) return '已编辑';
   return '';
 }
+
+/** Spec 3.4's three roles. Unknown values fall through rather than being renamed. */
+export function roleLabel(role: string): string {
+  switch (role) {
+    case 'owner':
+      return '群主';
+    case 'admin':
+      return '管理员';
+    case 'member':
+      return '成员';
+    default:
+      return role;
+  }
+}
