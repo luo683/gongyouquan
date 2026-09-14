@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GroupSummaryDto, InviteDto, MemberDto, MessageDto } from '@gongyouquan/contracts';
+import type { GroupSummaryDto, InviteDto, MemberDto, MessageDto, MessageReceiptsDto, ReadUpdatedEvent } from '@gongyouquan/contracts';
 import { io, type Socket } from 'socket.io-client';
 import { api, ApiError, clearSession, hasSession, setSession, type Tokens } from './api.js';
 import { copyFor, retryAfterSeconds, roleLabel, stateLabel } from './copy.js';
@@ -57,6 +57,23 @@ export function App() {
    * is the same reason createGroup gave up window.prompt.
    */
   const [confirming, setConfirming] = useState<{ kind: 'remove' | 'transfer'; userId: string } | null>(null);
+  /**
+   * messageId -> receipts. One entry carries both tiers: `readers` being present
+   * is what records that the expensive tier was paid for. Cleared on group switch,
+   * so it is bounded by one room's scrollback rather than the whole session.
+   */
+  const [receipts, setReceipts] = useState<Record<string, MessageReceiptsDto>>({});
+  /**
+   * A ref mirror, for the same reason selectedRef exists: the socket handlers and
+   * the intersection observer are each set up once, and reading the state from
+   * those closures would see the cache as it was at mount - always empty.
+   */
+  const receiptsRef = useRef<Record<string, MessageReceiptsDto>>({});
+  /** One name list at a time; spec 4.4.3 wants the names to stay rare. */
+  const [openReceipt, setOpenReceipt] = useState<string | null>(null);
+  /** Keyed by message AND tier, so a click for names is not swallowed by an aggregate fetch in flight. */
+  const inFlight = useRef<Set<string>>(new Set());
+  const streamRef = useRef<HTMLOListElement | null>(null);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<Socket | null>(null);
   const statesRef = useRef<Record<string, GroupState>>({});
@@ -113,6 +130,17 @@ export function App() {
       });
       socket.on('message:deleted', (message: MessageDto) => {
         commit(message.groupId, (state) => void applyEvent(state, message));
+      });
+      /**
+       * Someone advanced their position, so every cached count for this room may
+       * now be too low. Refetch what is already on screen: dropping the cache
+       * would not help, because a row that is already visible will never fire
+       * another intersection and would stay stale until the user scrolled it away
+       * and back.
+       */
+      socket.on('read:updated', (event: ReadUpdatedEvent) => {
+        if (event.groupId !== selectedRef.current) return;
+        for (const messageId of Object.keys(receiptsRef.current)) fetchReceipt(event.groupId, messageId);
       });
       socket.on('sync:ready', (ready: { groups: Array<{ groupId: string; lastSeq: number }> }) => {
         for (const group of ready.groups) {
@@ -173,6 +201,12 @@ export function App() {
     setConfirming(null);
     setAddUserId('');
     setPanelNotice('');
+    // Receipts belong to the room being left. The ref mirror and the in-flight set
+    // go with it, or a fetch started for the old room would land in the new cache.
+    receiptsRef.current = {};
+    setReceipts({});
+    setOpenReceipt(null);
+    inFlight.current.clear();
     const socket = socketRef.current;
     if (!socket) return;
     const local = statesRef.current[groupId] ?? emptyGroup(0);
@@ -263,7 +297,11 @@ export function App() {
       setNotice('');
       setNewGroupName('');
       await refreshGroups();
-      setSelected(created.id);
+      // Through chooseGroup, not setSelected: setting the id alone leaves the room
+      // half-open - the member panel keeps showing the previous group's members,
+      // no history or replay is loaded, and the socket room is never joined, so
+      // incoming messages are missed until the user happens to send one.
+      await chooseGroup(created.id);
     } catch (error) {
       setNotice(error instanceof ApiError ? error.message : '建群失败');
     }
@@ -359,6 +397,57 @@ export function App() {
       if (error instanceof ApiError) setNotice(error.message);
     }
   }
+
+  /**
+   * Reads the tier back out of the cache unless the caller names one, so a refresh
+   * never silently drops a name list the user is currently looking at.
+   *
+   * Failures are swallowed on purpose. A count that will not load is worth much
+   * less than a stream that stops rendering; the chip simply stays absent until
+   * the next read:updated asks again.
+   */
+  function fetchReceipt(groupId: string, messageId: string, detail?: 0 | 1): void {
+    const tier: 0 | 1 = detail ?? (receiptsRef.current[messageId]?.readers ? 1 : 0);
+    const key = `${messageId}:${tier}`;
+    if (inFlight.current.has(key)) return;
+    inFlight.current.add(key);
+    void api
+      .receipts(groupId, messageId, tier)
+      .then((dto) => {
+        receiptsRef.current = { ...receiptsRef.current, [messageId]: dto };
+        setReceipts(receiptsRef.current);
+      })
+      .catch(() => undefined)
+      .finally(() => inFlight.current.delete(key));
+  }
+
+  /**
+   * Spec 4.4.3: the aggregate is fetched as a message scrolls into view and
+   * cached, and the name list only on a click. Observing rows rather than walking
+   * the history is what keeps a long scrollback from costing one count query per
+   * message on every room open.
+   *
+   * Rows carry data-mid only when a chip will be drawn on them, so the observer is
+   * never asked about a message nobody can expand.
+   */
+  useEffect(() => {
+    const root = streamRef.current;
+    const groupId = selected;
+    if (!root || !groupId) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const messageId = (entry.target as HTMLElement).dataset.mid;
+          if (!messageId || receiptsRef.current[messageId]) continue;
+          fetchReceipt(groupId, messageId);
+        }
+      },
+      { root, threshold: 0.5 },
+    );
+    for (const row of root.querySelectorAll<HTMLElement>('[data-mid]')) observer.observe(row);
+    return () => observer.disconnect();
+  }, [selected, streams]);
 
   async function revoke(message: MessageDto): Promise<void> {
     const socket = socketRef.current;
@@ -540,29 +629,76 @@ export function App() {
                   : `成员 ${current.summary?.memberCount ?? members.length}`}
               </button>
             </header>
-            <ol className="stream">
-              {current.messages.map((message) => (
-                <li key={message.id} className={message.deletedAt ? 'msg gone' : 'msg'}>
-                  <span className="who">
-                    {message.senderId === tokens?.user.id
-                      ? '我'
-                      : message.senderId === null
-                        ? '系统'
-                        : (roster[message.senderId] ?? `工友 ${message.senderId}`)}
-                  </span>
-                  <span className="body">
-                    {message.deletedAt ? '该消息已撤回' : message.body}
-                    {message.editedAt && !message.deletedAt ? <em className="tag">已编辑</em> : null}
-                  </span>
-                  <span className="when">{new Date(message.createdAt).toLocaleTimeString('zh-CN', { hour12: false })}</span>
-                  {message.senderId === tokens?.user.id && !message.deletedAt ? (
-                    <button type="button" className="link" onClick={() => void revoke(message)}>
-                      撤回
-                    </button>
-                  ) : null}
-                  <span className="seq">#{message.seq}</span>
-                </li>
-              ))}
+            <ol className="stream" ref={streamRef}>
+              {current.messages.map((message) => {
+                const mine = message.senderId === tokens?.user.id;
+                const standing = !message.deletedAt;
+                const dto = receipts[message.id];
+                const namesOpen = openReceipt === message.id;
+                /**
+                 * Own messages only, and only while they stand. Spec 4.4.3 leaves
+                 * the display policy to the frontend and warns that a count on
+                 * every bubble drowns the room; a count under somebody else's
+                 * message only tells you what you already know. totalMembers of 0
+                 * means the sender is the whole room, and 0/0 is noise.
+                 */
+                const showReceipt = mine && standing && dto !== undefined && dto.totalMembers > 0;
+                return (
+                  <li
+                    key={message.id}
+                    className={message.deletedAt ? 'msg gone' : 'msg'}
+                    // Rows the observer should watch, and only those: a chip nobody
+                    // can expand is a count nobody asked for.
+                    data-mid={mine && standing ? message.id : undefined}
+                  >
+                    <span className="who">
+                      {mine ? '我' : message.senderId === null ? '系统' : (roster[message.senderId] ?? `工友 ${message.senderId}`)}
+                    </span>
+                    <span className="body">
+                      {message.deletedAt ? '该消息已撤回' : message.body}
+                      {message.editedAt && !message.deletedAt ? <em className="tag">已编辑</em> : null}
+                      {showReceipt && dto ? (
+                        <span className="receipt">
+                          <button
+                            type="button"
+                            className="link quiet"
+                            aria-expanded={namesOpen}
+                            // 4.4.4: a position retro-credits every older message, so
+                            // 已读到 is the honest claim and 已读 would overstate it.
+                            title="位点会追认：读到更新的消息即算读到此条"
+                            onClick={() => {
+                              if (namesOpen) {
+                                setOpenReceipt(null);
+                                return;
+                              }
+                              setOpenReceipt(message.id);
+                              // The expensive tier, and the only place it is ever
+                              // paid for: a click, never a scroll.
+                              if (!dto.readers && selected) fetchReceipt(selected, message.id, 1);
+                            }}
+                          >
+                            已读到 {dto.readCount}/{dto.totalMembers}
+                          </button>
+                          {namesOpen && dto.readers ? (
+                            <span className="readers">
+                              {dto.readers.length === 0
+                                ? '还没有人读到'
+                                : dto.readers.map((reader) => reader.displayName).join('、')}
+                            </span>
+                          ) : null}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="when">{new Date(message.createdAt).toLocaleTimeString('zh-CN', { hour12: false })}</span>
+                    {mine && standing ? (
+                      <button type="button" className="link" onClick={() => void revoke(message)}>
+                        撤回
+                      </button>
+                    ) : null}
+                    <span className="seq">#{message.seq}</span>
+                  </li>
+                );
+              })}
               {current.messages.length === 0 ? <li className="empty">还没有消息。</li> : null}
             </ol>
             <form

@@ -64,3 +64,10 @@ select { padding: .4rem; border: 1px solid #d4d6db; border-radius: 7px; font: in
 .minted { background: #e7effd; border-radius: 7px; padding: .5rem; display: grid; gap: .2rem; margin: 0 0 .4rem; }
 .minted code { font-size: 1rem; letter-spacing: .05em; }
 .leave { justify-self: start; }
+
+/* Deliberately quiet: it sits on every one of your own messages, and 4.4.3 warns
+   that a loud count per bubble drowns the room. */
+.receipt { display: inline-flex; gap: .35rem; align-items: baseline; margin-left: .5rem; }
+.link.quiet { color: #9a9aa2; font-size: .7rem; }
+.link.quiet:hover { color: #2f6feb; }
+.readers { color: #6b6b73; font-size: .7rem; }

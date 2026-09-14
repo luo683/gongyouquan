@@ -5,6 +5,7 @@ import {
   inviteDtoSchema,
   memberDtoSchema,
   messageDtoSchema,
+  messageReceiptsDtoSchema,
   messageSendResultSchema,
   inviteCreatedDtoSchema,
   type GroupDto,
@@ -12,6 +13,7 @@ import {
   type InviteDto,
   type MemberDto,
   type MessageDto,
+  type MessageReceiptsDto,
   type MessageSendResult,
 } from '@gongyouquan/contracts';
 import { copyFor } from './copy.js';
@@ -224,6 +226,18 @@ export const api = {
       method: 'POST',
       body: { lastReadSeq },
       schema: { parse: (value: unknown) => value as { lastReadSeq: number; mentionsReadSeq: number } },
+    }),
+
+  /**
+   * GET /groups/:gid/messages/:mid/receipts - 4.4.3's two tiers. 0 is the cheap
+   * aggregate the stream shows at a glance, 1 adds the name list and is only ever
+   * asked for on a click. A GET carries no body, so it must not claim a JSON
+   * content-type; see the note on call().
+   */
+  receipts: (groupId: string, messageId: string, detail: 0 | 1) =>
+    call<MessageReceiptsDto>(`/groups/${groupId}/messages/${messageId}/receipts?detail=${detail}`, {
+      method: 'GET',
+      schema: messageReceiptsDtoSchema,
     }),
 };
 
