@@ -45,7 +45,7 @@
 
 ## 四：5xx 速率的分母排除了探针
 
-`/healthz`、`/readyz`、`/internal/*` 不计入 `httpRequests5m`。Docker 的健康检查每 10 秒一次、巡检每 15 秒一次，算进分母会把真实的错误率稀释到接近零——巡检项 15 的阈值是「> 1%/分钟」，一个每分钟 6 次的探针足以把 5% 的真实错误率压到 1% 以下。
+`/healthz`、`/readyz`、`/internal/*` 不计入 `httpRequests5m`。`infra/deploy/docker-compose.yml` 里的健康检查配的是 **5s 与 10s 一次**（`interval: 5s` / `interval: 10s`），巡检脚本还要另加一轮，算进分母会把真实的错误率稀释到接近零——巡检项 15 的阈值是「> 1%/分钟」，一个每分钟 6 次的探针足以把 5% 的真实错误率压到 1% 以下。
 
 已实测：三次 `/api` 调用加两次探针，`httpRequests5m` 正好是 **3**。
 
