@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { messageEditBodySchema, messageHistoryQuerySchema, messageSendSchema } from '@gongyouquan/contracts';
+import { messageEditBodySchema, messageHistoryQuerySchema, messageReceiptsQuerySchema, messageSendSchema } from '@gongyouquan/contracts';
 import { errorEnvelope, guarded } from '../http/errors.js';
 import type { MessagesService } from './service.js';
 
@@ -43,6 +43,22 @@ export async function registerMessageRoutes(
     }
     const { gid } = request.params as { gid: string };
     return guarded(request, reply, () => messages.history(actor(request), gid, parsed.data));
+  });
+
+  /**
+   * 已读回执分级（spec 4.4.3）。Both :gid and :mid are passed through: the service
+   * answers 404 when they disagree, before it asks whether the caller is a member,
+   * so the error cannot be used to probe another group's message ids.
+   */
+  app.get('/api/v1/groups/:gid/messages/:mid/receipts', { preHandler: requireAuth }, async (request, reply) => {
+    const parsed = messageReceiptsQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send(errorEnvelope(request, 'INVALID_ARGUMENT', parsed.error.flatten()));
+    }
+    const { gid, mid } = request.params as { gid: string; mid: string };
+    return guarded(request, reply, () =>
+      messages.receipts(actor(request), gid, mid, parsed.data.detail === 1),
+    );
   });
 
   app.patch('/api/v1/messages/:mid', { preHandler: requireAuth }, async (request, reply) => {

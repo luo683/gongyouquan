@@ -5,6 +5,7 @@ import {
   messageHistoryQuerySchema,
   messagePageSchema,
   messageReceiptsDtoSchema,
+  messageReceiptsQuerySchema,
   messageSendResultSchema,
   messageSyncPageSchema,
   readPositionDtoSchema,
@@ -149,6 +150,15 @@ describe('read position and receipt contracts', () => {
       readers: [{ userId: '44', displayName: '工友甲', lastReadSeq: 106 }],
     });
     expect(detailed.readers?.[0]?.displayName).toBe('工友甲');
+  });
+
+  it('takes the receipt tier from a strict two-value flag, not from coercion', () => {
+    expect(messageReceiptsQuerySchema.parse({}).detail).toBe(0);
+    expect(messageReceiptsQuerySchema.parse({ detail: '0' }).detail).toBe(0);
+    expect(messageReceiptsQuerySchema.parse({ detail: '1' }).detail).toBe(1);
+    // Coercion would turn both of these into the cheap tier and hide a broken client.
+    expect(() => messageReceiptsQuerySchema.parse({ detail: '' })).toThrow();
+    expect(() => messageReceiptsQuerySchema.parse({ detail: '2' })).toThrow();
   });
 
   it('maps a WS ack failure onto the shared error-code enum', () => {

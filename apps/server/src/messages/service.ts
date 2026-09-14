@@ -1,4 +1,4 @@
-import type { GroupRole, MessageDto, MessageHistoryQuery, MessageSend } from '@gongyouquan/contracts';
+import type { GroupRole, MessageDto, MessageHistoryQuery, MessageReceiptsDto, MessageSend } from '@gongyouquan/contracts';
 import { HttpError, RateLimitedError } from '../http/errors.js';
 import { LIMITS, type RateLimiter } from '../http/rate-limit.js';
 import { requireMembership, requireRole, requireWritable, type GroupMembership } from '../groups/guards.js';
@@ -172,6 +172,29 @@ export function createMessagesService(
       requireRole(membership, MODERATOR_ROLES);
       if (message.deletedAt === null) throw new HttpError('STATE_MACHINE_VIOLATION', { deleted: false });
       return { body: message.body, deletedAt: message.deletedAt, deletedBy: message.deletedBy };
+    },
+
+    /**
+     * 已读回执（spec 4.4.3 / 路由表 667 行）。
+     *
+     * Deliberately not messageInGroup: the path carries a :gid that need not be
+     * the group the message really lives in, and the mismatch has to be answered
+     * before any membership question. Otherwise a member of A could pass gid=A
+     * with a message id from B and read group existence off which error came
+     * back - the same leak decision 0004 closes for group detail.
+     */
+    async receipts(actor: string, groupId: string, messageId: string, detail: boolean): Promise<MessageReceiptsDto> {
+      const message = await repo.findMessage(messageId);
+      if (!message || message.groupId !== groupId) throw new HttpError('NOT_FOUND');
+      // 403, not 404: spec line 1642 pins that for message reads, which is the
+      // opposite of the group-detail rule above. Both are intentional.
+      await requireMembership(groups, message.groupId, actor);
+      return repo.receipts({
+        groupId: message.groupId,
+        senderId: message.senderId,
+        seq: message.seq,
+        detail,
+      });
     },
 
     async history(

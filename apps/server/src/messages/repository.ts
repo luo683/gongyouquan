@@ -1,4 +1,4 @@
-import type { MessageDto, MessageKind } from '@gongyouquan/contracts';
+import type { MessageDto, MessageKind, MessageReceiptsDto } from '@gongyouquan/contracts';
 import type { QueryClient } from '../db/migrate.js';
 
 type Row = Record<string, unknown>;
@@ -144,6 +144,8 @@ export type MessageRepository = {
   applyRevoke(input: { messageId: string; actorId: string; moderator: boolean }): Promise<RevokeOutcome>;
   listBefore(input: { groupId: string; beforeSeq: number | null; limit: number }): Promise<{ items: MessageDto[]; hasMore: boolean }>;
   listAfter(input: { groupId: string; sinceSeq: number; limit: number }): Promise<{ items: MessageDto[]; hasMore: boolean }>;
+  /** 已读回执分级（spec 4.4.3）：detail=false 只付两个数，true 才多付一份名单。 */
+  receipts(input: { groupId: string; senderId: string | null; seq: number; detail: boolean }): Promise<MessageReceiptsDto>;
 };
 
 export function createMessagesRepository(database: QueryClient): MessageRepository {
@@ -330,6 +332,66 @@ export function createMessagesRepository(database: QueryClient): MessageReposito
       const hasMore = result.rows.length > limit;
       const items = result.rows.slice(0, limit).reverse().map(messageFromRow);
       return { items, hasMore };
+    },
+
+    async receipts({ groupId, senderId, seq, detail }) {
+      /**
+       * Both halves go through group_members rather than counting read_positions
+       * directly: a removed member's position row survives (users and groups
+       * cascade, membership is a soft delete), so a bare count would keep
+       * crediting someone who left the room.
+       *
+       * The sender is excluded from the denominator as well as the numerator.
+       * Spec line 1631 only pins the numerator and the removed-member rule, so
+       * this is our call: with the sender in the denominator a fully read room
+       * reports 4/5 forever and "已读" can never be complete.
+       *
+       * The exclusion is IS DISTINCT FROM, not <>: senderId is null for system
+       * and bot messages, and `user_id <> NULL` is NULL rather than true, so a
+       * plain <> would drop every row and report a room nobody had read as 0/0.
+       */
+      const summary = await database.query<Row>(
+        `SELECT
+           (SELECT count(*)
+              FROM group_members gm
+             WHERE gm.group_id = $1 AND gm.removed_at IS NULL
+               AND gm.user_id IS DISTINCT FROM $2::bigint) AS total_members,
+           (SELECT count(*)
+              FROM read_positions rp
+              JOIN group_members gm
+                ON gm.group_id = rp.group_id AND gm.user_id = rp.user_id AND gm.removed_at IS NULL
+             WHERE rp.group_id = $1 AND rp.last_read_seq >= $3
+               AND rp.user_id IS DISTINCT FROM $2::bigint) AS read_count`,
+        [groupId, senderId, seq],
+      );
+      const totals = summary.rows[0];
+      const readCount = Number(totals?.read_count ?? 0);
+      const totalMembers = Number(totals?.total_members ?? 0);
+      if (!detail) return { readCount, totalMembers };
+
+      // The name list is the expensive tier, which is exactly why spec 4.4.3 makes
+      // the client ask for it separately and only on a click. Group size is capped
+      // at 50, so this is bounded at 50 rows.
+      const names = await database.query<Row>(
+        `SELECT gm.user_id, u.display_name, rp.last_read_seq
+           FROM read_positions rp
+           JOIN group_members gm
+             ON gm.group_id = rp.group_id AND gm.user_id = rp.user_id AND gm.removed_at IS NULL
+           JOIN users u ON u.id = rp.user_id
+          WHERE rp.group_id = $1 AND rp.last_read_seq >= $3
+            AND rp.user_id IS DISTINCT FROM $2::bigint
+          ORDER BY rp.last_read_seq DESC, gm.user_id ASC`,
+        [groupId, senderId, seq],
+      );
+      return {
+        readCount,
+        totalMembers,
+        readers: names.rows.map((row) => ({
+          userId: String(row.user_id),
+          displayName: String(row.display_name),
+          lastReadSeq: Number(row.last_read_seq),
+        })),
+      };
     },
   };
 

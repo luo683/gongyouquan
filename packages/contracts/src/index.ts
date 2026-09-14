@@ -322,6 +322,20 @@ export const messageReceiptsDtoSchema = z.object({
 });
 export type MessageReceiptsDto = z.infer<typeof messageReceiptsDtoSchema>;
 
+/**
+ * 已读回执的分级开关（说明书 667 行：`?detail=0|1`）。
+ *
+ * 刻意用两值枚举而不是 `z.coerce.number()`：coerce 会把 `?detail=` 这种空值静默
+ * 变成 0，一个拼错的请求看起来就像合法的「只要聚合」。枚举让它在契约层就 400。
+ */
+export const messageReceiptsQuerySchema = z.object({
+  detail: z
+    .enum(['0', '1'])
+    .default('0')
+    .transform((value) => Number(value)),
+});
+export type MessageReceiptsQuery = z.infer<typeof messageReceiptsQuerySchema>;
+
 export const syncStateDtoSchema = z.object({
   lastSeq: z.number().int().nonnegative(),
   myLastReadSeq: z.number().int().nonnegative(),
