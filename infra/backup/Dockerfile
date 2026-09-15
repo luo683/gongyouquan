@@ -1,4 +1,4 @@
-# 工友圈 备份容器 —— 运维手册 3.2 的 `backup` 服务，跑 infra/backup/ 里的三个脚本。
+# 工友圈 备份容器 —— 运维手册 3.2 的 `backup` 服务，跑 infra/backup/ 里的五个脚本。
 #
 # 基座选 postgres:17-alpine 而不是 node/alpine + postgresql-client，理由是手册 8.2
 # 那句「pg_dump 的大版本必须与服务器一致」：栈里的服务器就是这个镜像。分装客户端

@@ -1,15 +1,15 @@
 # 交接文档：工友圈
 
-- 编写日期：2026-09-15（备份的异地那一段第一次真跑之后更新；上一版重写于 2026-09-14 深夜，替换同日那份被 mojibake 损坏且已过期的版本）
+- 编写日期：2026-09-15（`/hooks/alert` 落地、`notify-alert.sh` 有了签名发送方之后更新；同日更早一次更新写的是备份异地那一段的第一次真跑，上一版重写于 2026-09-14 深夜，替换同日那份被 mojibake 损坏且已过期的版本）
 - 适用仓库：`E:\工友圈`（远端 `git@github.com:luo683/gongyouquan.git`）
-- 交接起点：`feat/contracts-foundation` 分支，`HEAD = 31b1dde`，工作区干净
+- 交接起点：`feat/contracts-foundation` 分支，`HEAD = 0f5435b`，工作区干净
 - 设计真源：`docs/specs/` 下三份说明书（**不要改原文**，矛盾与缺口走 `docs/decisions/`）
 
 ---
 
 ## 1. 一句话现状
 
-后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；**已读回执、typing、presence（含在线快照）、@提及四条都已两侧打通**；`sync:hello` 已接通，服务端 `contractVersion` 现在真的会到浏览器；浏览器端（React + Vite）可真聊、未读徽标会消、成员管理可逐条点通、能 @ 人并收到「@我」列表。运维闭环起步：`/internal/metrics` 已按「只报能真实测到的」实现；`infra/backup/` 四个脚本 + `Dockerfile` 已在 compose 里接成 `backup` 服务，由 supercronic 调度、`backup-health.sh` 做新鲜度探活；**恢复演练不是文档而是真跑过**——本轮跑的是「从 restic 仓库里取回来的那一份」，七道检查全绿，外加五条各自以 1 退出的负向用例。**`backup-once.sh` 的异地那一段（restic）也是这一轮第一次被执行**：之前 `RESTIC_REPOSITORY` 一直是空的，所以那四行从来没被检验过——跑通之后发现手册 8.2 的 `restic forget` 缺 `--group-by tag`，而 dump 文件名带时间戳使每晚快照各成一组，**保留策略实际上一个都删不掉**（双向实测），连同另外四处偏离一起登记在 `decisions/0014`。部署栈的密钥已改成必填插值，缺任何一个 `docker compose config` 直接拒绝解析（见 `decisions/0012`）；备份容器与手册之间的三处出入登记在 `decisions/0013`。`lint / typecheck / test` 三道闸门本地全绿。**仍不可对外部署**——缺的是 `tasks / files / search / ops` 四个整块未动的模块、Electron 外壳、systemd / `opsctl` / 告警落点。**数据库、核心收发链路、以及「备份到底能不能恢复」这一条不再是阻塞项**；备份还缺的两件都不是代码：一个不在同一台机器上的 restic 仓库，和一把私钥放在机器外的 age 密钥。
+后端骨架与 `auth / groups / members / messages / sync` 五个垂直切片均已落地，并已在**真实 PostgreSQL 17.11** 上跑通、固化成集成测试；**已读回执、typing、presence（含在线快照）、@提及四条都已两侧打通**；`sync:hello` 已接通，服务端 `contractVersion` 现在真的会到浏览器；浏览器端（React + Vite）可真聊、未读徽标会消、成员管理可逐条点通、能 @ 人并收到「@我」列表。运维闭环起步：`/internal/metrics` 已按「只报能真实测到的」实现；`infra/backup/` 五个脚本 + `Dockerfile` 已在 compose 里接成 `backup` 服务，由 supercronic 调度、`backup-health.sh` 做新鲜度探活；**恢复演练不是文档而是真跑过**——本轮跑的是「从 restic 仓库里取回来的那一份」，七道检查全绿，外加五条各自以 1 退出的负向用例。**`backup-once.sh` 的异地那一段（restic）也是这一轮第一次被执行**：之前 `RESTIC_REPOSITORY` 一直是空的，所以那四行从来没被检验过——跑通之后发现手册 8.2 的 `restic forget` 缺 `--group-by tag`，而 dump 文件名带时间戳使每晚快照各成一组，**保留策略实际上一个都删不掉**（双向实测），连同另外四处偏离一起登记在 `decisions/0014`。部署栈的密钥已改成必填插值，缺任何一个 `docker compose config` 直接拒绝解析（见 `decisions/0012`）；备份容器与手册之间的三处出入登记在 `decisions/0013`。**告警终于有落点了**：`POST /api/v1/hooks/alert` 做 HMAC 验签、幂等键与 5 分钟聚合窗口，命中后把一行告警经 outbox 发进系统群；`infra/backup/notify-alert.sh` 是它的第一个（也是目前唯一一个）发送方，`backup-once.sh` 那条 `ERR` trap 从此指向一个真实存在的文件，`presence.onDrift` 也不再只打 `console.error`。**签名的取舍全部登记在 `decisions/0015`**，其中第五节是一个没有解决的缺口：7.1 设想的 Uptime Kuma 签不出这个名。**三道闸门本地全绿（236 用例），且 `/hooks/alert` 是真在跑起来的栈上验过的**，不是 dry run。**仍不可对外部署**——缺的是 `tasks / files / search` 三个整块未动的模块（`ops` 已经不是，但它只有 `/hooks/alert` 这一条路，审批闭环与 outbox worker 都还没有）、Electron 外壳、systemd / `opsctl`。**数据库、核心收发链路、以及「备份到底能不能恢复」这一条不再是阻塞项**；备份还缺的两件都不是代码：一个不在同一台机器上的 restic 仓库，和一把私钥放在机器外的 age 密钥。
 
 ---
 
@@ -18,14 +18,14 @@
 | 项 | 值 |
 |---|---|
 | 默认分支 | `main`（停在基线 `a322610`，尚未合并任何开发提交） |
-| 开发分支 | `feat/contracts-foundation`，**领先 `main` 60 个提交**（本文档自身的更新紧随其后，单独一个 docs 提交） |
-| 当前 HEAD | `31b1dde fix(backup): make the restic leg verify, prune and refuse instead of pretending` |
+| 开发分支 | `feat/contracts-foundation`，**领先 `main` 65 个提交**（本文档自身的更新紧随其后，单独一个 docs 提交） |
+| 当前 HEAD | `0f5435b docs(decisions): 0015, what "HMAC 签名" has to mean before it can be coded` |
 | 标签 | `m0-foundation` → `a322610`（仓库基线） |
 | 远端 | `origin` = `git@github.com:luo683/gongyouquan.git`，SSH，账号 `luo683` |
 | Git 身份 | `user.name=luo683`，`user.email=3012390263@qq.com` |
 | 提交约定 | `type(scope): summary`；一次提交只做一件可验证的事；不使用 `--force` |
 
-基线之后 60 个提交（旧→新，最后四条是本轮补的）：
+基线之后 65 个提交（旧→新，最后五条是本轮补的）：
 
 ```text
 3464abd feat(contracts): add shared transport schemas
@@ -88,6 +88,11 @@ a533923 feat: wire the sync:hello handshake and put a presence snapshot in it
 b94796c docs: bring the handover up to the backup container, with what the first run said
 f025c5e docs(decisions): 0014, the manual's restic forget line never removes anything
 31b1dde fix(backup): make the restic leg verify, prune and refuse instead of pretending
+92a6cb8 docs: bring the handover up to the restic leg, with what the first run said
+b10d61b feat(ops): /hooks/alert, so an alert finally has somewhere to land
+1bbbc6d fix(deploy): a blank optional variable means unset, which is all compose can send
+b06b26e feat(backup): notify-alert.sh, so a failed backup says so out loud
+0f5435b docs(decisions): 0015, what "HMAC 签名" has to mean before it can be coded
 ```
 
 ---
@@ -101,26 +106,27 @@ f025c5e docs(decisions): 0014, the manual's restic forget line never removes any
 │   ├── src/groups/         群 CRUD + 成员管理（members*.ts / member-routes.ts）
 │   ├── src/messages/       写入、编辑、撤回、历史分页、回执、@提及、bus 广播
 │   ├── src/sync/           水位、补投、读位点
+│   ├── src/ops/            `/hooks/alert`：HMAC 验签、聚合窗口、告警消息渲染
 │   ├── src/http/           错误封装、Bearer 鉴权、令牌桶限流
 │   ├── src/db/             连接池（含 `stats()`）、迁移加载器、advisory-lock 幂等迁移
 │   ├── src/presence.ts     在线状态内存映射 + 30 秒兜底扫描（4.6）
 │   ├── src/metrics.ts      `/internal/metrics` 采集器（4.7），4.7 表里 `broadcastMs` 刻意不实现
 │   ├── src/cli/create-admin.ts   首个账号引导（一次性）
 │   ├── src/runtime.ts      单进程装配 + Socket.IO 线
-│   └── tests/              22 个测试文件（含 integration/ 与 e2e/）
+│   └── tests/              27 个测试文件（含 integration/ 与 e2e/）
 ├── apps/web/               浏览器端（React + Vite + TS），复用 contracts schema
 │   └── src/{App.tsx,api.ts,copy.ts,syncStore.ts,main.tsx,styles.css}
 ├── packages/contracts/     共享契约（Zod schema + 类型），前后端唯一真源
-├── infra/db/               docker-compose.yml（dev PG）+ migrations/（0001,0002）
+├── infra/db/               docker-compose.yml（dev PG）+ migrations/（0001-0003）
 ├── infra/deploy/           docker-compose.yml + Caddyfile + 两个 Dockerfile + .env.example + gen-secrets.sh
-├── infra/backup/           Dockerfile + backup-once.sh / backup-loop.sh / restore-drill.sh / backup-health.sh
+├── infra/backup/           Dockerfile + backup-once.sh / backup-loop.sh / restore-drill.sh / backup-health.sh / notify-alert.sh
 ├── docs/specs/             三份说明书原件（01-后端 / 02-前端 / 03-AI运维）
-├── docs/decisions/         矛盾与缺口登记（0001-0013）
-├── eslint.config.js        根级 ESLint（flat config），lint 现已是真实闸门
+├── docs/decisions/         矛盾与缺口登记（0001-0015）
+├── eslint.config.js        根级 ESLint（flat config），lint 现为真实闸门
 └── .github/workflows/      CI（见 §7）
 ```
 
-`infra/backup/` 里那三个脚本目前没有配套的容器镜像，所以**只有 `restore-drill.sh` 是可以直接跑的**（它只需要 psql 与 pg_restore，最自然的位置就是临时 PG 容器内部）；`backup-once.sh` 与 `backup-loop.sh` 要等 restic / age / supercronic 打进镜像、并在 `infra/deploy/docker-compose.yml` 里加一个 `backup` 服务之后才会真的被调度。这是 §5 第 6 条剩下的主要缺口。
+`infra/backup/` 五个脚本都已经有镜像与 compose 服务了（`backup`，由 supercronic 调度，见 §4 运维闭环）。**唯一还差真东西的是 `notify-alert.sh` 的外部发送方**：它自己就是一个能签名的调用方，而 7.1 设想的 Uptime Kuma 签不出这个名（见 `decisions/0015` 第五节）。
 
 ---
 
@@ -158,14 +164,18 @@ f025c5e docs(decisions): 0014, the manual's restic forget line never removes any
 | **presence / typing**：在线状态只放进程内存（`Map<userId, Set<socketId>>`，不落库，4.6），多端只在集合**变空**时广播离线；`disconnect` 里**同步第一行**移除（放在 `await` 之后会在断开期间仍算在线、并向死连接广播）；30 秒兜底扫描**先量漂移再清理**（清理会修好泄漏，事后量就永远是干净的，探针等于没有）；`typing:*` 转发到房间且排除发送者，转发前查 `socket.rooms` —— 因为 `socket.to(room)` 不管发送者在不在房间里都投递 | `src/presence.ts`、`src/runtime.ts` |
 | **@提及**：`mentions` 由客户端给 id（服务端**校验**而不解析 body：去重、丢自己、丢非成员、上限 50），与消息同事务写 `message_mentions`（含冗余 `group_id` + `seq`，6.6 要求单索引可答「@我未读」）；提交后经 bus 的**个人通道**推 `mention:new` 到 `user:{uid}`；`GET /me/mentions` 跨群、游标是 messageId、`unread` 由 `mentions_read_seq` 在 SQL 里派生。**撤回消息的正文在这个列表里被置 null**，否则会绕过 `/raw` 的 owner/admin 门禁。取舍见 `decisions/0010` | `src/messages/`、`bus.ts` |
 | **`/internal/metrics`（4.7）**：抓一次即得 `wsConnections / presenceMapSize / presenceSocketCount / presenceDrift`、`pgPoolTotal/Idle/Waiting`、`outboxPending`（条数）与 `outboxLagSeconds`（年龄，**两个字段不能合一**，见 `decisions/0011` 第三节）、`heapUsed`、`eventLoopLagMs`、`http5xxCount5m / httpRequests5m / http5xxRate5m`、`syncPullRequests`、`contractVersion`。守卫是「loopback 直接放行，其余必须带 `INTERNAL_METRICS_TOKEN`」——因为巡检与 Docker 健康检查本来就从 loopback 与容器网发起。`onResponse` 钩子把 `/healthz`、`/readyz`、`/internal/*` **排除在 5xx 分母之外**（`infra/deploy/docker-compose.yml` 里的健康检查是 5s 与 10s 一次，算进去会把真实错误率稀释到接近零）。**`broadcastMs` 刻意不做**：服务端只能测到 `io.to().emit()` 的**入队**耗时，把它挂在投递延迟名下会让巡检项 17 永不告警、一旦告警又把 agent 引向错误的处置方向；替代信号是 `eventLoopLagMs`。取舍全文见 `decisions/0011` | `src/metrics.ts`、`src/runtime.ts` |
+| **`/hooks/alert`（`ops` 的第一条路）**：守卫是**签名**而不是 Bearer，所以要的是**原始字节**——Fastify 默认的 JSON 解析给出对象，而签名没法对「重新序列化」的结果校验（空白、键序、`\u` 转义过一轮 parse/stringify 就变了）。因此这个作用域自己 `addContentTypeParser('application/json', {parseAs:'string'})` 并用 `WeakMap` 按 request 存原文（**注册在子实例上而不是 `app`**：换掉根的解析器会连带改变其他所有路由对畸形 JSON 的回答）。检查按**代价顺序**而非契约顺序：验签 → 限流 → schema，反过来则签不出的人还能先花掉那 120/分钟——而 8.2 要求正是出事那一刻这个入口得活着。命中后走「一条事务 = 一次告警」：领幂等键 → 过期旧窗口 → UPSERT `alert_windows` → 发帖或改写 → 回填 `alert_events`。窗口是 **5 分钟翻滚**（`opened_at` 锚定，不是滑动，否则持续告警会永不到期），**滚动时 severity 一并重置**（否则一次 03:00 失败、之后已恢复的备份会到中午还挂着 `【critical】`，这就是运维群被静音的方式）。幂等键**必填**，重复投递返回 `deduplicated: true`；`messageId` 可空（还没落消息的窗口就是空）。聚合结果经 outbox 变成系统群里的一行 `【severity】标题 ×N / 来源 · 时间窗 / detail`。取舍全文见 `decisions/0015` | `src/ops/`（`hmac.ts`、`hooks-routes.ts`、`alert-repository.ts`、`alert-service.ts`、`alert-message.ts`、`presence-drift.ts`） |
+| **告警渲染**：一行正文 = 标题（多次则 `×N`）+ 来源与 UTC 时间窗 + `first_detail`（**只有第一条** detail 进运维群，其余留在表里）。时间戳解析不了时**原样打印**而不是 `NaN:NaN:NaN`——那行坏消息是这整条链路上唯一告诉人出了什么事的东西，它不该长得像另一个 bug。detail 超长按显示截断并在 meta 里标 `truncated`（全文不存） | `src/ops/alert-message.ts` |
+| **`presence.onDrift` 接上告警**：漂移不再只打 `console.error`，而是 `ingest` 一条 `presence-sweep` / warning / 指纹 `presence-drift` 的告警；**告警失败绝不能把巡检弄崩**，所以是 `.catch(onError)`，而 `onError` 默认才退回 console | `src/ops/presence-drift.ts`、`src/main.ts` |
 | Socket.IO 线：`sync:hello / sync:pull / message:send / message:edit / message:delete / read:update / typing:start / typing:stop`；出站另有 `presence:updated`、`typing:*`（带 `userId`）、`read:updated`（群房间）与 `mention:new`（**个人房间 `user:{uid}`**，758 行）；ack 一律是契约载荷或 `{error:{code,message}}`，`typing:*` 按 739 行**没有 ack** | `src/runtime.ts` |
 | **首个账号引导**：`docker compose run --rm server node --import tsx src/cli/create-admin.ts` —— 一次性建 用户 + 系统群 + 邀请码并打印，登录自校验；重复运行拒绝；不在启动时自动执行 | `src/cli/create-admin.ts` |
 
-**已注册的 HTTP 路由**（`/api/v1` 前缀，除 health/auth 外均需 Bearer）：
+**已注册的 HTTP 路由**（`/api/v1` 前缀，除 health / auth / `hooks` 外均需 Bearer——`hooks` 的凭据是签名，它比 Bearer 更严：没有登录态可借用）：
 
 ```text
 GET    /healthz, /readyz
 POST   /auth/register, /auth/login, /auth/refresh, /auth/logout, /auth/logout-all
+POST   /hooks/alert                       (HMAC 签名，无登录态；限流 120/分钟整桶共享)
 POST   /groups                         GET /groups, /groups/:gid, /groups/:gid/members
 PATCH  /groups/:gid
 POST   /groups/:gid/members            PATCH /groups/:gid/members/:uid   DELETE 同路径
@@ -205,18 +215,27 @@ GET    /internal/metrics
 - **换密钥对已有数据卷无效**——`POSTGRES_PASSWORD` 只在空数据目录时被应用一次。本机默认项目那个已有卷已按 `ALTER USER` 轮换（容器内 psql 走 localhost trust 行，所以不需要旧密码），换完 `up -d` 全绿；**别的项目/机器上重做这件事时，直接 `up` 会得到一个 28P01 且报错不提「卷是旧的」**
 - Caddy 只反代 `/api/*`、`/socket.io/*`、`/healthz`、`/readyz`，**`/internal/*` 不在其中**，所以 metrics 天然只存在于容器网内——这一点是上面那个 loopback 守卫成立的前提。**但「不在其中」的表现不是 404 而是 200**：`GET :8080/internal/metrics` 落到 SPA 的 `try_files … /index.html` 兜底，返回 200 + 395 字节 HTML。body 里没有指标，可**任何用 `curl -f` 或只看状态码的巡检都会把它读成「能访问」**。守卫另一侧也实测过：从 db 容器访问 `server:3000/internal/metrics` → **403**，从 server 容器自己访问 `127.0.0.1:3000` → 200 + JSON。所以巡检脚本必须 `docker exec` 进 server 容器里跑，或者带上 `INTERNAL_METRICS_TOKEN`
 - `create-admin` 在容器里的可用命令要带 `--workdir`：镜像的 `WORKDIR` 是 `/app` 而 `tsx` 只装在 `apps/server` 下，所以 `docker compose run --rm server node --import tsx src/cli/create-admin.ts`（本文档旧版的写法）报的是 `Cannot find package 'tsx' imported from /app/`。验证过的写法：`docker compose -f infra/deploy/docker-compose.yml run --rm --workdir /app/apps/server server node --import tsx src/cli/create-admin.ts --username <名>`（Git Bash 下要加 `MSYS_NO_PATHCONV=1`，见 §11 坑 21）
+- **compose 只能把「没填的可选项」传成空字符串，所以服务端必须把 `""` 当未设置。** `SERVER: '${SYSTEM_GROUP_ID:-}'` 这种写法在变量没填时传的是**空串而不是缺席**，而 zod 的 `z.string().min(1).optional()` 会拒空串 → 进程**启动即失败**。现在四个可选项（`SYSTEM_GROUP_ID` / `OPS_APPROVER_GROUP_ID` / `CONTRACT_VERSION` / `INTERNAL_METRICS_TOKEN`）过一层 `blankToUndefined`。**必填的那几把钥匙刻意没有这层**：那里空值必须继续报错（见上面的 `:?`），把「没填」和「填了个空」统一成一条错误路径正是必填的意义所在。**这个不对称是刻意的，不是漏改**——判定标准是「这个变量缺席时服务还能不能有意义地跑」。附带效果：`SYSTEM_GROUP_ID` 现在真的能设了，也就是 `/hooks/alert` 有一条能落进系统群的消息（此前它是必填的 `min(1)`，compose 又只能传空串，等于**在生产栈里根本设不了**）
 
 ### 运维闭环 `infra/backup`（手册 8.1-8.3）
 
 - **`backup-once.sh`** —— 手册 8.2 的实现：`nice -n 19 pg_dump -Fc -Z6` + `pg_dumpall --globals-only | gzip`，然后**必须** `pg_restore --list` 通过且 TOC 条目数 > 0 才算成功（「只生成文件不算备份」）。`.env` 只在有 age 公钥时加密带走，**否则跳过而不是明文落盘**。异地未配置时**直接失败退出**，除非显式 `ALLOW_LOCAL_ONLY=1`——一个只会写本地的脚本在服务器报废那天等于没有备份。成功后写 `last_success.json`（巡检项 20 读它的 mtime，项 21 读它指向的 dump），本地暂存留 3 天
+  - **失败现在会说话**：每步开头改 `STEP=`，`ERR` trap 报「停在「第 N 步 …」（第 X 行）」，六个步骤各有名字。**`die()` 也单独通知一次**，因为 `exit 1` 不触发 `ERR`、而 `|| die …` 里的命令失败同样不触发——不补这一句的话，本轮修的那两类失败（dump 校验不过、restic 仓库不存在）恰好都是走 `die` 的，也就是最需要说话的那两类。用 `$LINENO` 而不是 `$BASH_COMMAND`：后者是**已展开**的命令行，而 `export PGPASSWORD="$POSTGRES_PASSWORD"` 是脚本里的一行，展开出来就是把数据库口令打进一条会发到运维群的告警里
 - **`restore-drill.sh`** —— 手册 8.3 的实现，**刻意写成 POSIX sh**：stock `postgres:17-alpine` 里有 psql / pg_restore / createdb 但**没有 bash**，而这个脚本最自然的执行位置就是那个临时容器内部。七道检查，**退出码就是结论**（不打印一堆数字让人自己判断）：dump 可读性（放在恢复**之前**，恢复一个坏 dump 会得到半个数据库，那比恢复失败更难发现）、核心表可查、行数下限、最新 10 条**文本**消息正文非空、引用完整性（悬挂 attachments / mentions / memberships）、`schema_migrations` 非空（否则恢复出来的库启动时会重跑迁移、可能与已恢复的结构冲突）、`alloc_group_seq` 可调用。**七道全部是致命的**，只有全局对象恢复是警告——它在 `--no-owner` 路径上本来就不被依赖。目标库已存在则**拒绝执行**——对着有数据的库演练分不清哪些行是恢复出来的。`pg_restore` 的输出不再丢进 `/dev/null`：失败时打末尾 25 行，因为这个脚本最常见的执行场景是「服务器已经没了，对着异地副本试一次」，那时报错文本是唯一线索
   - **本轮修掉的两处**：3.3 原先把「正文为空」当截断证据，但 `messages.body` 在 `0001_init.sql:150` 就是可空的（`image / file / system / task_card` 没有正文）——**第一张图片就会把演练判成失败**，而一个总是指控错了的演练下次真出事时没人当真；现在限定 `kind = 'text' AND deleted_at IS NULL`。3.6 原先失败时打一行「需人工确认」却**仍无条件 ok**——没有人在读那行警告，退出码才是结论
-- **`backup-loop.sh`** —— backup 容器的 entrypoint：crontab 由 `BACKUP_HOUR`/`BACKUP_MINUTE` 生成而不是写死在镜像里（改时间不该重建镜像）；启动时先自检 `pg_dump / pg_restore / restic / age`（缺 pg 客户端直接 fatal，因为没它这个容器毫无意义；**restic 用 `restic version` 子命令而不是 `--version`**，统一拼法会打出 `unknown flag: --version`，让这份「工具链到底在不在」的证据日志长得像装坏了）；若 `last_success.json` 已超过 26 小时则**立即补跑**——容器可能正好在 03:00 不在运行，而「等明天那一班」意味着那一整天没有任何副本。实测启动输出：`pg_dump (PostgreSQL) 17.11` / `pg_restore 17.11` / `restic 0.18.1` / `age v1.3.1`
-- **`Dockerfile`** —— 基座是 `postgres:17-alpine` 而不是「node 镜像 + postgresql-client」，理由就是手册 8.2 那句 `pg_dump` 大版本必须与服务器一致：跟着服务器同一个 tag 走，对齐是结构性的而不是需要提醒的。四个 apk 包各有独立理由（`bash` 因为 `set -euo pipefail` 的 pipefail 对 `pg_dumpall | gzip` 是承重的；`age` 缺了会让 `.env` 静默不进备份；`supercronic` 取 apk 包而非 `curl|sh` 拉 GitHub 二进制）。镜像 424MB → 522MB。**注意 `ENTRYPOINT` 已占用**：`docker run IMAGE sh -c '…'` 会把 `sh -c …` 当成**参数交给 backup-loop.sh**，于是它开始跑调度并永不退出；一次性命令必须 `--entrypoint sh`（本轮踩过，卡了 120 秒）
-- **compose 里的 `backup` 服务**（`infra/deploy/docker-compose.yml`）—— `depends_on: db: service_healthy`，挂 `uploads:ro` + `backups` 卷 + `./.env:/opt/chat/.env:ro` + `./age:/etc/age:ro`，`no-new-privileges`。**`mem_limit: 256m` 是对手册 2.4 那个 100m 的刻意偏离**（超出部分正是 `pg_dump -Z6` 的压缩缓冲与 restic 的上传，而被 cgroup 无预警杀掉的是备份——下一个需要恢复的人只会发现副本停在三天前）；上线前按真实数据量重测。**这里有个第一轮没发现的洞**：`AGE_RECIPIENT_FILE=/etc/age/recipient.pub` 写好了却什么都没挂，于是公钥永远不存在、`.env` 永远不会被备份，而手册 4.3 说这是后果最严重的一项。改成挂**目录**而不是挂文件，是为了避开「bind mount 一个不存在的文件时 Docker 会在目标处造出空目录」那个坑（同文件 `.env` 那行的注释里已经记过一次）
-- **`backup-health.sh`** —— 巡检项 20 在这个栈里的落点。`backup-once.sh` 失败时本该调 `notify-alert.sh`，而那个脚本属于还没开始的 `ops` 模块，所以**此刻没有任何东西会因为有备份失败而说话**；挂成 Docker healthcheck，`docker compose ps` 就会显出红色。阈值 26h（与 `backup-loop.sh` 的补跑阈值同源）。输出顺带报出 `last_success.json` 里的异地模式（`ok：上次备份 0 小时前，异地=local-only`）——**但 local-only 不判为失败**：还没配 restic 的装机第一天会拿到一个永久红色的容器，而一个总是红的灯没有人读。让它可见，不让它失败
-  - **变红这件事单独验过**（因为整条运维闭环现在的唯一信号就是它）：清空 `/backups` 之后 `docker inspect` 的健康日志依次记 `ExitCode 0` → `1` → `1`，输出是那行「没有任何成功备份…」。`interval: 10m` × `retries: 3`，所以**状态翻转最多要 30 分钟**，不是立刻
-  - **两类失败的最坏发现时延不一样**，这决定了这个探针值多少：`last_success.json` 整个不见了（卷被清、被误删）→ 下一次探针就报 1，**≤10 分钟**；备份每晚都失败但**昨天那份 marker 还在**→ 只有等它过期，也就是 **26 小时 + 至多 10 分钟**才发现。第二种才是 `backup-once.sh` 常规失败的样子，所以这个探针真正承诺的是「**一天之内一定有人看见**」，不是「当晚就知道」。`notify-alert.sh` 落进 `ops` 模块之后该由它去补第一种之外的空档
+- **`backup-loop.sh`** —— backup 容器的 entrypoint：crontab 由 `BACKUP_HOUR`/`BACKUP_MINUTE` 生成而不是写死在镜像里（改时间不该重建镜像）；启动时先自检 `pg_dump / pg_restore / restic / age / openssl`（缺 pg 客户端直接 fatal，因为没它这个容器毫无意义；**restic 用 `restic version` 子命令而不是 `--version`**，统一拼法会打出 `unknown flag: --version`，让这份「工具链到底在不在」的证据日志长得像装坏了；**缺 openssl 是警告而不是 fatal**——没有它备份照样做得成，只是失败时发不出告警，为此把整条备份停掉是把「没人说话」看得比「没有备份」更重）；若 `last_success.json` 已超过 26 小时则**立即补跑**——容器可能正好在 03:00 不在运行，而「等明天那一班」意味着那一整天没有任何副本。实测启动输出：`pg_dump (PostgreSQL) 17.11` / `pg_restore 17.11` / `restic 0.18.1` / `age v1.3.1` / `OpenSSL 3.5.8 25 Aug 2026`
+- **`Dockerfile`** —— 基座是 `postgres:17-alpine` 而不是「node 镜像 + postgresql-client」，理由就是手册 8.2 那句 `pg_dump` 大版本必须与服务器一致：跟着服务器同一个 tag 走，对齐是结构性的而不是需要提醒的。五个 apk 包各有独立理由（`bash` 因为 `set -euo pipefail` 的 pipefail 对 `pg_dumpall | gzip` 是承重的；**`openssl` 因为 `notify-alert.sh` 要算 HMAC-SHA256**——基座镜像有 libcrypto 但**没有 `openssl` 这个命令行**，busybox 的 wget 也没有任何 HMAC 能力，而 `/hooks/alert` 只收签名过的请求。这是五个包里唯一一个「缺了就整条失败路径静默」的：备份坏了没人说话，而且没有任何一行日志说为什么没人说；`age` 缺了会让 `.env` 静默不进备份；`supercronic` 取 apk 包而非 `curl|sh` 拉 GitHub 二进制）。镜像 424MB → 522MB。**显式 `chmod 755` 是承重的不是保险**：`git ls-files -s` 显示这几个脚本在仓库里就是 `100644`（在 Windows 工作树里 add 的，执行位从没进过 index），所以 `COPY` 进去就是不可执行的——少了那行，后果是凌晨三点 supercronic 拿到一个 `Permission denied` 写进日志没人看。**注意 `ENTRYPOINT` 已占用**：`docker run IMAGE sh -c '…'` 会把 `sh -c …` 当成**参数交给 backup-loop.sh**，于是它开始跑调度并永不退出；一次性命令必须 `--entrypoint sh`（踩过，卡了 120 秒）
+- **compose 里的 `backup` 服务**（`infra/deploy/docker-compose.yml`）—— `depends_on: db: service_healthy` + `server: service_started`，挂 `uploads:ro` + `backups` 卷 + `./.env:/opt/chat/.env:ro` + `./age:/etc/age:ro`，`no-new-privileges`。环境变量新增 `ALERT_HMAC_SECRET`（与 server 同一把，签名要对得上）与 `ALERT_URL: http://server:3000/api/v1/hooks/alert`。**对 server 只要 `service_started` 而不是 `service_healthy`**：备份要的是「03:00 那一刻 server 已经在启动队列里」，而不是「此刻 `/readyz` 是绿的」——真到出事那天，最该发得出告警的恰恰是 server 半死不活的时候，把 healthcheck 设成硬门会让备份在故障时**连带**不跑。**`mem_limit: 256m` 是对手册 2.4 那个 100m 的刻意偏离**（超出部分正是 `pg_dump -Z6` 的压缩缓冲与 restic 的上传，而被 cgroup 无预警杀掉的是备份——下一个需要恢复的人只会发现副本停在三天前）；上线前按真实数据量重测。**这里有个第一轮没发现的洞**：`AGE_RECIPIENT_FILE=/etc/age/recipient.pub` 写好了却什么都没挂，于是公钥永远不存在、`.env` 永远不会被备份，而手册 4.3 说这是后果最严重的一项。改成挂**目录**而不是挂文件，是为了避开「bind mount 一个不存在的文件时 Docker 会在目标处造出空目录」那个坑（同文件 `.env` 那行的注释里已经记过一次）
+- **`notify-alert.sh`** —— `/hooks/alert` 的**签名客户端**，也是 `backup-once.sh` 那条 trap 现在指向的文件。为什么它在备份目录而不是 `ops` 的某个 ts 文件里：备份容器里没有 node，而有 `openssl` 与 busybox 的 `wget`——`openssl dgst -sha256 -hmac` 与 node 的 `createHmac` 是**逐字节兼容**的（这一点单独对过：同一串输入两边算出同一个 hex），所以不必为了「能签名」往这个镜像里塞一个运行时。`printf '%s\n%s' "$TS" "$BODY" | openssl …`，签名对象是 `timestamp\nbody`，与服务端一致。几个刻意的决定：
+  - **没有 `set -e`**。一个「通知别人出事了」的脚本自己因为一条 `grep` 返回非 0 而半路死掉，是最坏的一种失败——它连「我没能发出通知」都来不及说。缺参数、缺 `ALERT_HMAC_SECRET`、缺 openssl 时**直接退出 0 并打一行原因**（跳过不是失败），只有 POST 真的失败才退 1
+  - **两次尝试，复用同一份签名字节**（`sleep 3` 后重发）。重签一次会得到不同的时间戳，也就等于在说「这条告警发了两次」；而 ±300 秒的容差内同一个签名可以重复用，重试要的正是「同一条」
+  - **`one_line()` 把 title 里的 CR/LF 折成空格**——因为标题是聚合键的一半，一条带换行的标题会让同一个故障在窗口表里裂成两行。`json_escape()` 先 `tr -d` 控制字符、再按**反斜杠在前**的顺序替换（后反斜杠会二次转义引号）
+  - **本轮在它身上翻的一次车，是跑出来的不是读出来的**：手写 JSON 模板 + 「可选字段前置一个逗号」的拼法，在给了 `fingerprint` 时拼出 `{"title":"x",,"fingerprint":"y""detail":…}`——两个逗号撞在一起、又少一个，服务端回 **400**。`bash -x … | grep BODY=` 一眼看到。现在改成把字段塞进一个变量、逗号由拼接负责。这类手拼模板的地方只会被下一个可选字段再咬一次
+  - **能看到的只有状态行**：busybox 的 `wget` 会把服务端返回的 `error.code` 吞掉，日志里只有 `HTTP/1.1 401 Unauthorized` 这一行。判断过不值得为它换个客户端：401 / 503 / 连不上 三态已经足够定位（分别是密钥不匹配、系统群没配、server 没起），所以不装 curl。**这是本机验证过的边界，不是通用结论**
+  - **真跑过的证据**（不是 dry run）：在跑着的栈里把 `backup-once.sh` 的 `pg_dump` 指到一个不存在的库，几秒后系统群出现这一行，`hitCount` 由并发的第二条命中合并而来 —— `【critical】备份失败 ×2` / `backup · 01:19:01 → 01:19:11 UTC` / `停在「第 1 步 pg_dump」（第 59 行）`。同一次验证里，故意换一把错的 `ALERT_HMAC_SECRET` 发出去，得到 401 且群里什么都没多
+- **`backup-health.sh`** —— 巡检项 20 在这个栈里的落点。**它是第二道防线，不是唯一一道**：`notify-alert.sh` 现在真的存在了，可告警链路自己也会断——密钥不同步、server 正在重启、`SYSTEM_GROUP_ID` 没配（→ 503），这几种情况下「备份失败」这条消息发不出去而**发出失败这件事本身也没有别的出口**。healthcheck 不依赖任何对端，挂成 Docker 的，`docker compose ps` 就会显出红色。阈值 26h（与 `backup-loop.sh` 的补跑阈值同源）。输出顺带报出 `last_success.json` 里的异地模式（`ok：上次备份 0 小时前，异地=local-only`）以及 restic 快照 id——**但 local-only 不判为失败**：还没配 restic 的装机第一天会拿到一个永久红色的容器，而一个总是红的灯没有人读。让它可见，不让它失败
+  - **变红这件事单独验过**：清空 `/backups` 之后 `docker inspect` 的健康日志依次记 `ExitCode 0` → `1` → `1`，输出是那行「没有任何成功备份…」。`interval: 10m` × `retries: 3`，所以**状态翻转最多要 30 分钟**，不是立刻
+  - **两类失败的最坏发现时延不一样**，这决定了这两个探针各值多少：`last_success.json` 整个不见了（卷被清、被误删）→ 下一次探针就报 1，**≤10 分钟**；备份每晚都失败但**昨天那份 marker 还在**→ 只有等它过期，也就是 **26 小时 + 至多 10 分钟**才**被 healthcheck** 发现。而这第二种恰恰是 `backup-once.sh` 常规失败的样子——它现在由 `notify-alert.sh` 在**当晚**就说出来（见上一条的真跑证据），healthcheck 那条 26 小时的线因此退化成「告警链路自己也断了」时的兜底。**两道防线覆盖的是同一个洞的两种塌法，不是重复**
 
 **演练已经真跑过，不是文档**。本轮跑的是**容器自己产出的那一份**（上一轮跑的是手工对 `gyq_dev` dump 出来的），这样演练覆盖的才是真实链路而不是它的近似：先在栈里种下真数据（`create-admin` 建 `drillboss` + 邀请码注册 `drillmate` + 三条消息 + 一次 @ 人 + 一次相同 `clientMsgId` 的重发），再由 `backup-once.sh` dump，再灌进一个一次性 `postgres:17-alpine`：
 
@@ -274,7 +293,7 @@ uploads 快照 → 0 B（这台机器的 uploads 卷是空的，所以「附件�
 
 - **一个真的在机器外的 age 密钥。** 本轮为测通链路生成过一把（`age-keygen` 在容器里，公钥挂进 `/etc/age/recipient.pub`），验到「加密 → 从 restic 取回 → 解密 → 与 `/opt/chat/.env` 逐字节相同（2,362 字节）」。然后**连公钥、那个测试仓库、卷里所有 `env-backup.age` 一起删掉了**——留下的公钥比没有公钥更危险：`backup-once.sh` 会照常加密并报告 `env_backed_up: true`，而那份密文再也解不开（私钥当时只在容器的可写层里，重建即消失）。删掉之后重跑了降级路径确认仍然安全：`警告：找不到 age 或 recipient 公钥，跳过 .env 备份（不会明文落盘）` → `env_backed_up: false` → 在 `/backups` 里 `grep -rl "POSTGRES_PASSWORD="` 无命中。`infra/deploy/age/` 整目录在 `.gitignore` 里。真要上线，缺的是「私钥归谁、放在哪」，不是代码。
 - **一个不在同一台机器上的 restic 仓库。** restic 这一段本轮已经跑通（见上），但仓库在 `/backups/restic-repo`——**和它声称要保护的那台机器一起消失**。所以 `0013` 里那句「配上 restic 仓库就删掉 `ALLOW_LOCAL_ONLY` 的 `:-1` 默认」**这一轮没有兑现，也不是忘了**：同机仓库不算异地。要删那一行需要真的指向对象存储或另一台机器的 `RESTIC_REPOSITORY`（手册 4.4 那对 `OSS_ACCESS_KEY_*`，restic 的 s3 backend 读它）。详见 `0014` 第七节。
-- **`notify-alert.sh` 的落点**（在还没开始的 `ops` 模块里）。它不在，`backup-once.sh` 那个 `ERR` trap 就指向一个镜像里不存在的文件，于是**备份失败唯一的可见落点是容器 healthcheck 变红**——而上一节算过，常规失败最坏要 26 小时 + 10 分钟才看得见。
+- **告警的发送方还只有一个，而它不该是唯一一个。** `notify-alert.sh` 这一轮落地了（在镜像里、真跑通、失败当晚就说话），但它只覆盖「备份自己失败」。手册 7.1 设想的 **Uptime Kuma 签不出这个名**——它没有「对 `timestamp\nbody` 做 HMAC-SHA256 并放进 `x-alert-signature`」这种自定义能力，所以那一路要么换一个能签的调用方，要么在中间放一个转换器。这是一个**没有解决的缺口**，不是待办里的实现细节，见 `decisions/0015` 第五节。
 - **附件那一段还是空的。** uploads 快照实测 0 B，因为这台机器的 uploads 卷里没有任何文件。8.3 演练要求的「从仓库恢复附件并抽查 sha256（通过率必须 100%）」因此做不了——要等 `files` 模块先存在，否则只能得到「0 个文件、通过率 100%」这种没有意义的结论。
 
 ### 测试与质量闸门（2026-09-15 本地实测）
@@ -282,12 +301,14 @@ uploads 快照 → 0 B（这台机器的 uploads 卷是空的，所以「附件�
 ```text
 pnpm lint        eslint .                          → 0 error（lint 已是真实闸门，不再是空转）
 pnpm typecheck   3 包全过
-pnpm test        无库机器：contracts 31 + web 9 + server 75 通过，server 另有 72 个真库用例整片 skip（7 个文件）
-真库闸门         INTEGRATION_DATABASE_URL 设上后 server 147 全过（22 文件，含真库集成与 e2e 双人聊天）
-合计             27 文件 / 187 用例，全绿（2026-09-15 用 §9 那份 Node 22 复跑确认）
-连续两轮 infra    上一轮改 Dockerfile 与 compose 接线、本轮改 restic 那一段，三道闸门各复跑一次，数字一字未变——
-                 因为**它们管不到 `infra/backup/`**：两轮改的全是 shell 脚本、Dockerfile、compose 与 .gitignore，
-                 没有一个 `.ts`。那条路只能靠 §4 运维闭环里那些真跑出来的数字，`pnpm test` 全绿不代表备份能用
+pnpm test        无库机器：contracts 31 + web 9 + server 113 通过，server 另有 83 个真库用例整片 skip（8 个文件）
+真库闸门         INTEGRATION_DATABASE_URL 设上后 server 196 全过（27 文件，含真库集成与 e2e 双人聊天）
+合计             32 文件 / 236 用例，全绿（2026-09-15 用 §9 那份 Node 22 复跑确认）
+连续三轮 infra    改 Dockerfile 与 compose 接线、改 restic 那一段、改备份的失败通知，三道闸门各复跑一次，
+                 前两轮数字一字未变——因为**它们管不到 `infra/backup/`**：那两轮改的全是 shell 脚本、Dockerfile、
+                 compose 与 .gitignore，没有一个 `.ts`。那条路只能靠 §4 运维闭环里那些真跑出来的数字，
+                 `pnpm test` 全绿不代表备份能用。本轮不一样：`/hooks/alert` 是真 `.ts`，
+                 所以「脚本调用它」这一侧第一次同时被 `pnpm test` 和被 §4 那条 401 实测覆盖到
 ```
 
 ### 未读徽标与读位点（已提交 `2ab03f8`）
@@ -306,11 +327,11 @@ socket handler 只注册一次，闭包里的 `selected` 会过期，所以用 `
 ## 5. 还没做到的（按重要性）
 
 1. **messages / sync 仍缺**：编辑/撤回窗口过期时 socket 侧对 `read:updated` 的推送、以及前端推进 `mentions_read_seq` 的入口（`decisions/0010` 第五节：侧栏「@我」计数目前是**会话内**口径，不是服务端已读）。**已读回执、`typing:*`、`presence:updated`（含 `sync:ready` 里的在线快照，前端成员面板已画「在线」）、`mention:new` 均已两侧打通。**
-2. **整块未动的模块**：`tasks` / `files` / `search` / `ops`。其中 `ops` 含 `/hooks/*` 的幂等与聚合。
+2. **整块未动的模块**：`tasks` / `files` / `search` 三个仍是空的。**`ops` 已经不再是**，但它只落了 `/hooks/alert` 这一条路：手册 7.x 的 `/hooks/ops-report`、`/hooks/ops-request`、`/ops/requests/:rid/decision`、`/ops/requests` 都还没有，**运维请求的审批闭环（谁批、批了之后谁执行）一条都没有**；另外 `alert_windows` / `alert_events` 两张表已经有了、`/hooks/alert` 的幂等与 5 分钟聚合也已经有了，剩下的 `ops` 工作里最大的一件其实不是路由而是 **outbox worker**——现在没有任何进程把事件推到终态，所以 `processed_at` 永远为空（`readyz` 的 lag 因此单调上涨，见 §11 坑 17 与 `decisions/0006` 缺口六）。
 3. **成员管理收尾**：离职转交的批量入口、`notification_prefs`、成员列表的 `includeRemoved` 查询参数。
 4. **改密接口**：`logout-all` 已实现，但目前只能由前端显式调用，没有「改密后强制全端下线」的入口。
 5. **浏览器端仍缺**：Electron 外壳（`apps/desktop`）、改密入口、归档群入口。**成员管理界面与已读回执展示都已做**（真浏览器逐条点过），成员侧还差 `includeRemoved` 的历史成员视图与离职批量转交入口。
-6. **部署仍缺**（按「做完才能上线」的顺序）：**systemd 单元与 `opsctl`**；**告警接入**（`ops` 模块未开始，`presence.onDrift` 目前只能 `console.error`，`backup-once.sh` 的 `ERR` trap 指向的 `/usr/local/bin/notify-alert.sh` **在镜像里不存在**，所以现在备份失败的唯一可见落点是容器 healthcheck 变红）；**一把私钥在机器外的 age 密钥**（公钥挂载、加密、从 restic 取回、解密回环本轮全部验过，见 §4 运维闭环；缺的是「私钥归谁、放哪」而不是代码）；**一个不在同一台机器上的 restic 仓库**（restic 分支本轮真跑通了，但仓库在 `/backups` 同一个卷上，不满足 8.1，所以 `ALLOW_LOCAL_ONLY` 那个 `:-1` 例外**还不能删**，见 `decisions/0014` 第七节）。**备份容器已做**：镜像 + `backup` 服务接线 + `backup-health.sh` 探活，并且恢复演练跑的是「从 restic 仓库取回来的那一份」而不是本地暂存那一份（见 §4 运维闭环）。**生产 secret 注入已做**：compose 里五把钥匙全部必填、`gen-secrets.sh` 生成并校验、整套栈在注入值下真跑通（见 §4 部署）。说明书 9.2 六项对账里还剩四项（`groups.last_seq >= max(messages.seq)`、打回次数、`files.ref_count`、悬挂 attachments，逐项卡在哪见 `decisions/0011` 第五节）。`/internal/metrics` **已做**。
+6. **部署仍缺**（按「做完才能上线」的顺序）：**systemd 单元与 `opsctl`**；**告警接入的服务端与备份侧已做**（`POST /api/v1/hooks/alert` 收签名、幂等、聚合；`notify-alert.sh` 在备份镜像里，`backup-once.sh` 失败当晚就会说话；`presence.onDrift` 也不再只打 `console.error`）——**剩下的是「谁来签」**：7.1 设想的 Uptime Kuma 产不出这个 HMAC，那一路要么换调用方要么加转换器，见 `decisions/0015` 第五节；**一把私钥在机器外的 age 密钥**（公钥挂载、加密、从 restic 取回、解密回环全部验过，见 §4 运维闭环；缺的是「私钥归谁、放哪」而不是代码）；**一个不在同一台机器上的 restic 仓库**（restic 分支真跑通了，但仓库在 `/backups` 同一个卷上，不满足 8.1，所以 `ALLOW_LOCAL_ONLY` 那个 `:-1` 例外**还不能删**，见 `decisions/0014` 第七节）。**备份容器已做**：镜像 + `backup` 服务接线 + `backup-health.sh` 探活，并且恢复演练跑的是「从 restic 仓库取回来的那一份」而不是本地暂存那一份（见 §4 运维闭环）。**生产 secret 注入已做**：compose 里五把钥匙全部必填、`gen-secrets.sh` 生成并校验、整套栈在注入值下真跑通（见 §4 部署）。说明书 9.2 六项对账里还剩四项（`groups.last_seq >= max(messages.seq)`、打回次数、`files.ref_count`、悬挂 attachments，逐项卡在哪见 `decisions/0011` 第五节）。`/internal/metrics` **已做**。
 7. **`CONTRACT_VERSION` 仍是注入的常量**（fallback `dev-nohash`），不是说明书 §7 第 4 条要求的「contracts 包 hash 前 8 位」；构建期没有计算步骤。
 8. **数据库侧只剩**：说明书 1685 行要求的 `EXPLAIN (ANALYZE, BUFFERS)` + 几千行样例数据的计划验证（见 `docs/decisions/0005`）。
 
@@ -353,6 +374,34 @@ pnpm --filter @gongyouquan/server dev
 # 浏览器端：VITE_DEV_API_ORIGIN=http://127.0.0.1:3100 pnpm --filter @gongyouquan/web dev（Vite 5173）
 ```
 
+手工验一条告警（手册 10.2 那条「手动 curl 一条告警 → 确认运维群收到」）。签名对象是 `timestamp` + `\n` + 原文 body 这**一整段字节**，不是正文单独：
+
+```bash
+BODY='{"source":"manual-test","severity":"warning","title":"手工一条","idempotencyKey":"probe-1","detail":"来自 §6"}'
+TS=$(date +%s)
+SECRET=$(grep '^ALERT_HMAC_SECRET=' infra/deploy/.env | cut -d= -f2)
+SIG=$(printf '%s\n%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | awk '{print $NF}')
+curl -s -X POST http://127.0.0.1:8080/api/v1/hooks/alert \
+  -H 'content-type: application/json' \
+  -H "x-alert-timestamp: $TS" -H "x-alert-signature: sha256=$SIG" \
+  --data "$BODY"
+# 走 8080（web/Caddy）而不是 3000：`server` 服务**没有发布任何宿主端口**，
+# 而 Caddyfile 的 `handle /api/*` 会把它转给 server:3000。上面这条本机实测过：
+# 换一把错密钥 → 401；换回对的 → 200 + {"messageId":"10","deduplicated":false}
+# 从容器里发就别用 curl（镜像里没有），notify-alert.sh 用的是 busybox 的 wget，
+# 它只打状态行、不打响应体——见 §11 坑 33
+# 换一个 idempotencyKey 再发同一 source + 同一 title，才会看到 ×2 而不是新起一行
+# （5 分钟翻滚窗口内）；同一个 key 重发返回的是 deduplicated: true
+```
+
+让备份真的失败一次，看它会不会说话（比上面的手工一条更接近真实路径，因为它走的是 `backup-once.sh` 的 trap）：
+
+```bash
+MSYS_NO_PATHCONV=1 docker exec gongyouquan-backup-1 sh -c \
+  'PG_HOST=nonexistent /usr/local/bin/backup-once.sh'
+# 期望：系统群里出现 `【critical】备份失败 ×N` + `停在「第 1 步 pg_dump」（第 X 行）`
+```
+
 ---
 
 ## 7. CI 与它的盲区
@@ -369,7 +418,7 @@ pnpm --filter @gongyouquan/server dev
 
 ## 8. 说明书里的矛盾与取舍（`docs/decisions/`）
 
-0002-0011 多为 `open` 状态：**取舍已实现，但说明书本身还没修订**。接手后若与产品/需求方对齐，应回头关掉它们。
+0002-0015 多为 `open` 状态：**取舍已实现，但说明书本身还没修订**（0014 与 0015 里各有一节是「已实现但等你拍板」，另有一节是「没解决的缺口」而不是取舍，见 §10）。接手后若与产品/需求方对齐，应回头关掉它们。
 
 | 文件 | 关键内容 |
 |---|---|
@@ -387,6 +436,7 @@ pnpm --filter @gongyouquan/server dev
 | `0012-secret-generation-and-uri.md` | 手册 4.1 的 `openssl rand -base64 48` 与手册 3.2 的 `DATABASE_URL: postgres://user:${POSTGRES_PASSWORD}@…` **合起来会坏**：base64 字母表含 `/` 与 `+`，约 87% 的生成结果至少含一个，`pg` 报 `Invalid URL`（实测）。现在 `POSTGRES_PASSWORD` 走 hex、其余四把仍 base64。另两节：`:?` 对空值也报错所以 `.env.example` 里密钥留空；`db/01-set-password.sql` 声称的理由复现不出来，故删除而不是模板化 |
 | `0013-backup-service-env-mount-and-resource-gaps.md` | **手册 3.2 的 `backup` 服务实现不了手册 4.3 的要求**：4.3 要 `.env` age 加密随备份带走，而 3.2 只有 `env_file: [.env]`（注入环境、不留可读文件）+ `uploads`/`backups` 两个挂载，容器里既没有 `.env` 也没有放公钥的地方——失败方式是一行每天重复、没人读的警告。现在补了两个只读挂载，其中 `./age` **挂目录不挂文件**，因为 Docker 对「源文件不存在的 bind mount」会在目标处造空目录。另两节：`mem_limit` 用 256m 而不是 2.4 的 100m（**这个数字没有实测依据，上线前须按生产数据量重测**）；`ALLOW_LOCAL_ONLY` 是手册里没有的变量，把 8.1「本地副本不是备份策略」这条硬规则换成一处**显式、可见、配上 restic 后必须删掉**的例外 |
 | `0014-restic-forget-group-by-and-retention-gaps.md` | **手册 8.2 的 `restic forget` 那一行永远不会删掉任何东西**：restic 默认按 `host,paths` 分组，而 dump 文件名带时间戳，于是每晚快照各成一组、每组只有它自己，`keep-daily 7` 一个都删不掉、仓库无限增长（**双向实测**：同一策略不加 `--group-by` 保留 2 删 0，加 `--group-by tag` 才删 1）。另五节：8.1 给 PostgreSQL 的是「异地 14 日 / 8 周 / 6 月」而 8.2 与 6.12 都是 7/4/6，**三处两不一致**，已按 8.1 的对象级数字分两档实现（只多不少）待拍板；`command -v restic` 挂在 `if` 条件上会让「配了异地但镜像里没 restic」静默退回本地；仓库不存在时**不替你 init**（对着拼错的路径 init 会「成功」，restic 自己退 10 而外层按 `-eq 1` 判断会漏）；`UPLOADS_DIR` 缺失不再静默跳过（否则「只有数据库、没有附件」也算成功备份）；巡检项 22 原本**没有数据源**，现在 `last_success.json` 记 `restic_snapshot`/`restic_time`。第七节：本轮跑通的仓库在**同机卷上，不算异地**，所以 `0013` 那条「配上 restic 就删 `ALLOW_LOCAL_ONLY`」还没到兑现的时候 |
+| `0015-alert-hook-signature-aggregation-and-its-tables.md` | `/hooks/alert` 落地时**说明书没有给的东西**去哪了：①「HMAC 签名（无登录态）」必须先定成字节格式才对得上一把密钥——定稿为 `HMAC-SHA256(secret, "${timestamp}\n${rawBody}")`，头 `x-alert-timestamp` + `x-alert-signature: sha256=<hex>`，±300 秒容差，`timingSafeEqual` 前先比长度；②聚合是 **5 分钟翻滚窗口**（`opened_at` 锚定）而不是滑动，否则持续告警永不到期；**窗口滚动时 severity 必须一起重置**（不重置则一次已恢复的失败会在运维群里顶着 `【critical】` 活到永远，这是运维群被静音的标准路径）；③为什么要两张新表（`alert_events` / `alert_windows`）而不是给 `messages` 加列，以及 `alert_events.window_id` 为什么可空；④`idempotencyKey` 必填、重复投递以 `deduplicated: true` 回答、`messageId` 可空；⑤并发用**这条事务本身当互斥**（`alert_windows.agg_key` 上的唯一索引 + 行锁持到 COMMIT），而不是 advisory lock 或排队——前者的锁生命周期与数据变更不在同一个事务里，后者需要一个还没有的进程；⑥只有 `first_detail` 进运维群那一行，其余留在表里；⑦两个新错误码都不在 8.1 的表里：`HOOK_SIGNATURE_INVALID`（401，用 `UNAUTHENTICATED` 会让运维以为是登录掉了）与 `OPS_GROUP_NOT_CONFIGURED`（503 + `details.reason` 分 `env-unset` / `group-not-found`，报 `NOT_FOUND` 会说成「群不存在」而真因可能是压根没配）。**第五节是一个未解决的缺口而不是取舍**：7.1 设想的 Uptime Kuma 产不出这个签名（它没有自定义 HMAC 能力），**而这一条没有对着真实的 Kuma 验过**，措辞按此收敛 |
 
 几个**已拍死、改之前先看 decision** 的行为：
 
@@ -395,6 +445,8 @@ pnpm --filter @gongyouquan/server dev
 - `GET /groups` 的 `includeArchived` 默认 **false**（说明书没写，这是我们的选择）。
 - 登录失败统一 `AUTH_INVALID_CREDENTIALS`，不区分用户名不存在与密码错误。
 - 已读回执：`readCount` 与 `totalMembers` **都**排除发送者（说明书只钉了分子，见 `0008` 一节）；`:gid` 与消息实际所属群不符时，先于成员判定返回 `404`，不用 `403`。
+- `/hooks/alert`：**验签先于限流**。把限流放前面看起来更省，实际是任何签不出名的人都能花掉真实发送方在出事那一刻需要的 120/分钟。已经这样定了，别按「便宜的检查先做」的直觉调回去。
+- `/hooks/alert`：聚合窗口滚动时 **`severity` 一起重置**，不是一路取最大值。看似「保留最高级别更安全」，实际效果是运维群里那一行永远停在历史最高严重度上，直到有人把这个群静音。
 
 ---
 
@@ -454,7 +506,7 @@ docker exec gongyouquan-db-1 psql -U gongyouquan -d gongyouquan -c \
 6. `decisions/0009` 的两条已按选项 A 落地（`sync:hello` 接通、在线快照进 `sync:ready`），可以回头关掉。
 7. 上线前剩下的是**这台机器给不了的两样**：**一把 age 密钥**（在机器外面 `age-keygen -o ~/gyq.age.key`，只把 `age-keygen -y` 的结果放进 `infra/deploy/age/recipient.pub`；私钥与密文同机存放等于没加密，而**一个没有对应私钥的公钥比没有公钥更糟**——`backup-once.sh` 会照常加密、报告 `env_backed_up: true`，那份密文再也解不开）；**一个不在同一台机器上的 restic 仓库**（设上 `RESTIC_REPOSITORY` + `RESTIC_PASSWORD`，之后就该把 `ALLOW_LOCAL_ONLY=1` 这行例外声明从栈里去掉）。**restic 这一段本轮已经真跑通了**（`/backups/restic-repo`，仓库 id 与全部实测数字见 §4 运维闭环）——但它和备份暂存在同一个卷上，机器没了它也没了，**所以那句「配上 restic 就删掉例外」还没到兑现的时候**。上一轮那条「写 Dockerfile 并在 compose 里加 `backup` 服务」已完成（`5dd2822`）。换到生产环境后要按生产的 dump 重做一次演练，**而不是反过来让脚本去迁就一次已经通过的结果**。
 8. 拍板 `docs/decisions/0014` 第二节：**异地到底留 14 日 / 8 周 / 6 月，还是 7 / 4 / 6**。手册 8.1 的 PostgreSQL 那一行是前者，8.2 的脚本与 6.12 的风险表都是后者，三处两不一致。当前实现按 8.1 的对象级数字分两档（数据与密钥 14/8/6，附件 7/4/6），方向是只多不少；若真实意图是一律 7/4/6，那 8.1 要改，而**能往回恢复的天数会从 14 天缩到 7 天**。
-9. 之后才往 `tasks / files / search / ops` 走——这是仅剩的四个整块未动的模块，其中 `ops` 会补上 `presence.onDrift` 与告警的落点。
+9. 之后才往 `tasks / files / search` 走——这是仅剩的三个整块未动的模块。`ops` 已经有了第一条路（`/hooks/alert` + `notify-alert.sh` + `presence.onDrift`），**下一件最该做的是 outbox worker**：`processed_at` 现在永远为空，`readyz` 的 `outboxLag` 单调上涨，一条孤儿事件能把它永久钉住（§11 坑 17 与 `decisions/0006` 缺口六）。再往后才是 `/hooks/ops-report`、`/hooks/ops-request` 与 `/ops/requests/:rid/decision` 那条审批闭环——它比路由更重，因为「批了之后谁执行」在说明书里也是没定的。
 
 ---
 
@@ -464,7 +516,7 @@ docker exec gongyouquan-db-1 psql -U gongyouquan -d gongyouquan -c \
 2. **BIGINT 主键必须序列化成字符串**，前端禁止 `Number(id)`（过 2^53 会静默丢精度）。
 3. **`clientMsgId` 在重试/降级/401 重放时必须复用**，否则弱网下产生重复消息。
 4. `errorEnvelope.message` 是英文、给日志看；中文文案由前端按 `code` 映射。
-5. 迁移文件**只增不改**：已发布迁移改了 checksum 会导致启动直接失败（故意的保护）。加了新迁移就顺手改 `apps/server/tests/db.test.ts` 里那份迁移清单断言，否则静态检查与真库各说一套。
+5. 迁移文件**只增不改**：已发布迁移改了 checksum 会导致启动直接失败（故意的保护）。加了新迁移就顺手改 `apps/server/tests/db.test.ts` 里那份迁移清单断言，否则静态检查与真库各说一套。**本轮的真实踩法是反过来的**：0003 已经应用到 `gyq_dev` 之后又去改它，结果**整个集成套件以 `migration checksum mismatch: 0003…` 开头、后面 83 个用例整片 skip**——看起来像「测试被跳过了」，实际是那道防篡改检查在挡。修法是删掉那两张表与 `schema_migrations` 里对应的 `0003%` 那行让 harness 重跑，**而不是去改校验和**（改校验和等于把闸门焊开，而下一个人根本不知道曾经焊过）。
 6. 不要为了「跑起来方便」在 `main.ts` 里塞假的 readiness provider —— `apps/server` 的设计是数据库不可用就不能就绪。
 7. **撤回是两行规则，不是一行**：`撤回自己的消息（2 分钟内）` 对 owner/admin/member 都是 ✓，`撤回他人的消息` 只有 owner/admin ✓。写成「管理员免窗口」就等于群主能撤自己三天前的话。见 `docs/decisions/0006` 末节。
 8. `outbox.aggregate_id` **没有也不可能有外键**（多态）。消息被删后事件会留下，而 `readyz` 的 lag 取「最老的未处理事件」——一条孤儿就能把 lag 永久钉住。worker 必须让每个事件都到终态，见 `docs/decisions/0006` 缺口六。
@@ -491,3 +543,5 @@ docker exec gongyouquan-db-1 psql -U gongyouquan -d gongyouquan -c \
 29. **`restic forget` 的默认分组会让保留策略一声不响地失效。** restic 按 `host,paths` 分组后再应用 `keep-daily`，而备份文件名里带时间戳 → 每晚的快照各成一组、每组只有它自己 → 那一个永远是「当天最后一个」→ **一个都删不掉**。手册 8.2 那一行就缺 `--group-by tag`，所以照抄它的脚本永远不会真正回收空间。它同时给出**两个方向都错**的后果：6.12 担心的「prune 删多」根本不会发生，而「对象存储账单每月翻倍」一定会。更糟的是它看起来在工作——`forget` 打一整屏表格，每行都写着 `keep 1 snapshots`。要判断它到底有没有生效，只能数它删了几个：`--dry-run` 加 `--keep-daily 1`，删 0 就是分组坏了。
 30. **`set -e` 不会因为 `[ -d x ] && cmd` 左侧为假而退出**——我读 `backup-once.sh` 时断定那三行 `&&` 会在第一次真跑 restic 时当场把脚本弄死（`/caddy-data` 在本机永远不存在），写好定罪的话才去跑最小复现：`set -euo pipefail; [ -d /nope ] && restic backup x; echo after` → 打印 `after`，退出 0。POSIX 的规则是 errexit **不覆盖** `&&` 列表里「最后一个 `&&` 之前」的命令。**读出来的缺陷要先跑一次再定罪**：这一条如果直接写进文档，下一个人就会去「修」一个不存在的问题，而真正在那儿的「附件卷没挂上会静默跳过」反而没人看。改成 `if` 是为了可读，不是修 bug——那三行确实有个 bug，只是不是我以为的那个。
 31. **坑 21 还有另一半：`docker cp` 主机侧的路径也会被 Windows 解析错。** `docker cp CONTAINER:/tmp/x /tmp/y` 里第二个 `/tmp/y` 交给的是 Docker 这个 Windows 进程，它按 `C:\tmp\y` 去找，报 `no such directory`——而报的是「目录」不是「权限」，很容易误以为容器侧出了问题。`MSYS_NO_PATHCONV=1` 在这里反而**帮倒忙**：它会阻止 Git Bash 把 `/e/…` 翻成 `E:\…`。可行做法是把主机侧落在仓库内的目录（`.tmp/`，已在 `.gitignore` 里），让 Git Bash 正常转换它，而容器侧的 `NAME:/abs/path` 不以斜杠开头、MSYS 本来就不会碰它。
+32. **`ERR` trap 抓不到 `exit`，也抓不到 `||` 列表里失败的命令**——所以「失败时会说话」这件事，只挂 trap 是不够的。`backup-once.sh` 里 `pg_restore --list "$DUMP" > /dev/null || die "…"` 这一类失败，命令的非 0 被 `||` 吃掉了，errexit 不触发，trap 一声不响；而 `die()` 自己走 `exit 1`，同样不是 `ERR`。本轮新加的两类失败（dump 校验不过、restic 仓库不存在）**恰好全是这一类**，也就是说：如果只在 trap 上做手脚，最需要说话的那两种失败正是不会说话的两种。修法是 `die()` 里也通知一次。**同一处还有一个反向的坑**：trap 里用 `$BASH_COMMAND` 看起来最自然（「把出错那一行报出来」），但它是**已经展开**的命令行，而脚本第 53 行就是 `export PGPASSWORD="$POSTGRES_PASSWORD"` —— 展开出来就是把数据库口令写进一条会发到运维群的告警。所以报 `$LINENO` 而不报命令本身。
+33. **在 shell 里手拼 JSON，第一个可选字段就会翻车。** `notify-alert.sh` 原来按「固定模板 + 可选字段各带一个前置逗号」拼，给了 `fingerprint` 时得到 `{"title":"x",,"fingerprint":"y""detail":…}`：两个逗号撞在一起、`fingerprint` 结尾又少一个，服务端回 **400 而不是 401**——这个区别本身是线索（说明签名过了、是载荷不合法）。**逗号该属于「拼接」这个动作，不该属于字段。** 现在第一个字段初始化那个字符串，后面每个字段各自 `fields="$fields,\"…\":…"` 往上追加，可选的 `fingerprint` 整条（连同它那个前导逗号）在 `if` 里，所以它不存在时不会留下悬空的分隔符。**同一条链路上另一半不好查的是客户端看不见报错体**：busybox 的 `wget` 只打状态行，`error.code` 与 `details` 全被吞掉，所以「400 还是 401」这种**状态码级别**的差异是这里能拿到的全部信息；这也是为什么值得把 401 / 503 / 连不上 三态在文档里写清楚（三态够用，就没有为它装 curl 的必要）。
