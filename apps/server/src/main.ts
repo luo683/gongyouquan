@@ -12,6 +12,10 @@ import { createMembersService } from './groups/members-service.js';
 import { createMessageBus } from './messages/bus.js';
 import { createSyncRepository } from './sync/repository.js';
 import { createSyncService } from './sync/service.js';
+import { createAlertRepository } from './ops/alert-repository.js';
+import { createAlertService } from './ops/alert-service.js';
+import { createAlertSignatureVerifier } from './ops/hmac.js';
+import { createPresenceDriftAlerter } from './ops/presence-drift.js';
 import { createRateLimiter } from './http/rate-limit.js';
 import { buildApp, type Runtime, type RuntimeOptions } from './runtime.js';
 import { parseEnv, type ServerEnv } from './config/env.js';
@@ -37,6 +41,17 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
   // handlers and the services. Spec 8.2 is a single-process design; several
   // replicas would each get their own copy of every limit.
   const limiter = createRateLimiter();
+  /**
+   * Built once, next to the bus and limiter it depends on. `/hooks/alert` is the
+   * only consumer today; the presence-drift path below reaches the same service
+   * rather than posting its own copy of the alert rules.
+   */
+  const alerts = createAlertService({
+    groups: groupsRepo,
+    repo: createAlertRepository(database),
+    publish: bus.publish,
+    systemGroupId: env.systemGroupId,
+  });
   return {
     jwtSecret: new TextEncoder().encode(env.jwtSecret),
     contractVersion: env.contractVersion,
@@ -82,6 +97,12 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
      * are included: they stay readable and their members still see them.
      */
     getPresenceGroups: async (userId) => (await groupsRepo.listGroups(userId, true)).map((group) => group.id),
+    /**
+     * Spec 4.6's leak probe, which until now could only reach a log line. It rides
+     * the same ingestion as an external alert, so a drift lands in #运维告警 as one
+     * counting line per 5-minute window rather than one message per sweep.
+     */
+    onPresenceDrift: createPresenceDriftAlerter((alert) => alerts.ingest(alert)),
     /** Membership for the sync:ready presence snapshot; the presence map itself is process memory. */
     getGroupMemberIds: (groupIds) => groupsRepo.memberUserIds(groupIds),
     members: createMembersService(createMembersRepository(database), groupsRepo),
@@ -101,6 +122,17 @@ function defaultRuntimeOptions(env: ServerEnv, database: Database): RuntimeOptio
       repo: createSyncRepository(database, messagesRepo),
       contractVersion: env.contractVersion ?? CONTRACT_VERSION_FALLBACK,
     }),
+    /**
+     * `/hooks/alert`. The verifier is built here rather than in the route because
+     * the secret is an environment concern, and the route should not be able to
+     * run without one - an absent secret would otherwise mean "nothing is checked"
+     * on the only endpoint that has no login state behind it.
+     */
+    hooks: {
+      verifier: createAlertSignatureVerifier({ secret: env.alertHmacSecret }),
+      ingest: (alert) => alerts.ingest(alert),
+      limiter,
+    },
   };
 }
 

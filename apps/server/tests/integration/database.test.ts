@@ -92,10 +92,12 @@ describe.runIf(databaseUrl() !== '')('database integration (real PostgreSQL)', (
             WHERE n.nspname = 'public' AND e.extname IN ('pg_trgm', 'pgcrypto')) AS ext_needed
       `);
       const row = row0(shape.rows);
-      expect(num(row.tables)).toBe(22);
+      // 22 from 0001_init.sql; 0003 adds alert_windows and alert_events.
+      expect(num(row.tables)).toBe(24);
       expect(num(row.own_funcs)).toBe(4);
-      // 7 come from 0001_init.sql; 0002_messages_updated_at.sql adds the 8th.
-      expect(num(row.triggers)).toBe(8);
+      // 7 come from 0001_init.sql; 0002_messages_updated_at.sql adds the 8th and
+      // 0003_alert_idempotency_and_aggregation.sql the 9th.
+      expect(num(row.triggers)).toBe(9);
       expect(num(row.enums)).toBe(11);
       expect(num(row.ext_needed)).toBe(2);
       // 41 hand-written indexes plus one backing index per PK / unique constraint.
@@ -137,7 +139,11 @@ describe.runIf(databaseUrl() !== '')('database integration (real PostgreSQL)', (
   describe('migration runner', () => {
     it('re-running the migration is a no-op (spec 01 §9.4)', async () => {
       const first = await snapshotMigrations();
-      expect(first.map((m) => m.id)).toEqual(['0001_init.sql', '0002_messages_updated_at.sql']);
+      expect(first.map((m) => m.id)).toEqual([
+        '0001_init.sql',
+        '0002_messages_updated_at.sql',
+        '0003_alert_idempotency_and_aggregation.sql',
+      ]);
 
       await migrateDatabase(db);
 

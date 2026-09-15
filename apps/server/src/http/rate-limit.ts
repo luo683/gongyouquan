@@ -100,4 +100,11 @@ export const LIMITS = {
   sendPerUserGroup: { limit: 30, windowMs: 60_000 },
   sendPerUser: { limit: 200, windowMs: 60_000 },
   otherWritesPerUser: { limit: 600, windowMs: 60_000 },
+  /**
+   * Spec 8.2's 来源（HMAC key） row. There is no user behind these calls, and the
+   * limit is not there to stop abuse so much as to keep the backend standing while
+   * it is being told about its own outage - a disk-full loop that posts once a
+   * second must not be the thing that takes the API down.
+   */
+  hooksPerKey: { limit: 120, windowMs: 60_000 },
 } as const;

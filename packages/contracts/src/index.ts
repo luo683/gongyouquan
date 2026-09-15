@@ -43,6 +43,10 @@ export const errorCodeSchema = z.enum([
   'DELETE_WINDOW_EXPIRED',
   'GROUP_ARCHIVED',
   'RATE_LIMITED',
+  /** Only /hooks/* can answer these two. */
+  'HOOK_SIGNATURE_INVALID',
+  /** 503: the endpoint works, the deployment has nowhere to put the alert. */
+  'OPS_GROUP_NOT_CONFIGURED',
 ]);
 export type ErrorCode = z.infer<typeof errorCodeSchema>;
 
@@ -492,3 +496,60 @@ export const memberUpdateSchema = z
     message: 'role 或 transferOwnership 至少要给一个',
   });
 export type MemberUpdate = z.infer<typeof memberUpdateSchema>;
+
+// ============================================================
+// 告警接口 —— 说明书 03 的 5.8 与 8.2 表末行（/hooks/*）
+// ============================================================
+
+export const alertSeveritySchema = z.enum(['info', 'warning', 'critical']);
+export type AlertSeverity = z.infer<typeof alertSeveritySchema>;
+
+/**
+ * POST /hooks/alert 的请求体。无登录态，靠 HMAC 头证明来源（见服务端 ops/hmac.ts）。
+ *
+ * `source` 是一个标签而不是自由文本，`title` 不许带换行——这两条都不是审美：服务端把
+ * 聚合键拼成 `source + \n + title`，分隔符必须出现在任何一半之外，否则
+ * `source="a", title="b\nc"` 与 `source="a\nb", title="c"` 会落进同一个窗口，
+ * 把两件不相干的故障合并成一条计数消息。单行标题本来也是运维群那条消息要的形状。
+ *
+ * `idempotencyKey` 是必填而不是可选：这个键是「重复投递只落一条」的唯一依据，
+ * 少了它就得改用 (source, title, 时间窗) 猜，而猜出来的幂等会把两分钟内两次
+ * 真实故障合并成一条。发送方（notify-alert.sh、ops-collect.sh、Uptime Kuma 的
+ * 转发脚本）都握得出生成这个键的材料，所以把它做成必填没有代价。
+ *
+ * `detail` 的上限放得很宽（20 KB）：这条消息的全部意义是「有一件事坏了」，
+ * 因为超长度而 400 掉的告警等于丢掉告警。超限的裁剪发生在渲染那条群消息的时候，
+ * 不在入口。
+ */
+export const alertHookSchema = z.object({
+  source: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9._-]+$/, 'source 只能做标签：字母数字与 . _ -'),
+  severity: alertSeveritySchema,
+  title: z
+    .string()
+    .min(1)
+    .max(200)
+    .refine((value) => !/[\r\n]/.test(value), 'title 必须是单行'),
+  detail: z.string().max(20_000).optional(),
+  fingerprint: z.string().max(128).optional(),
+  idempotencyKey: z.string().min(1).max(200),
+});
+export type AlertHook = z.infer<typeof alertHookSchema>;
+
+/**
+ * `deduplicated` 是说明书响应 shape 里没写的一个字段。加上它是因为重投的发送方
+ * 需要区分「我的告警第一次被收到」和「收到但我早就收过」——前者意味着链路通了，
+ * 后者意味着某个上游在重试，这两件事在排障时不是同一个信号。
+ *
+ * `messageId` 只在一种情况下为 null：重放，而当初那条群消息已经不在了（删掉运维群
+ * 会级联删掉它）。发送方把 `deduplicated: true` 理解成「没有新东西发生」即可，
+ * 不必依赖这个 id 指到哪一行。
+ */
+export const alertHookResultSchema = z.object({
+  messageId: entityIdSchema.nullable(),
+  deduplicated: z.boolean(),
+});
+export type AlertHookResult = z.infer<typeof alertHookResultSchema>;

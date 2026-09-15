@@ -42,7 +42,7 @@ const SELECT_MESSAGE = `SELECT ${messageColumns('m')} FROM messages m`;
  * QueryClient.withSession is optional so the unit-test fakes can omit it; the real
  * pool always provides one. This is the only place that unwraps it.
  */
-function withSession<T>(database: QueryClient, fn: (session: QueryClient) => Promise<T>): Promise<T> {
+export function withSession<T>(database: QueryClient, fn: (session: QueryClient) => Promise<T>): Promise<T> {
   const open = database.withSession;
   if (!open) throw new Error('DATABASE_SESSION_REQUIRED');
   return open.call(database, fn) as Promise<T>;
@@ -74,6 +74,65 @@ const UNIQUE_VIOLATION = '23505';
 
 export const EDIT_WINDOW = '15 minutes';
 export const DELETE_WINDOW = '2 minutes';
+
+/**
+ * Server-generated messages: the ops alerts of spec 03 5.8 and whatever else the
+ * backend posts on its own behalf.
+ *
+ * Session-level on purpose. An alert write is three statements that have to be
+ * one decision (claim the idempotency key, land it in an aggregation window, post
+ * or amend the group message), and a helper that opens its own transaction would
+ * either break that atomicity or force the caller to pass a pool it already holds.
+ *
+ * `sender_id` stays NULL because that is what the column means (0001 line 147:
+ * "NULL = 系统/机器人消息"), and the frontend already renders a NULL author as
+ * 系统. Creating a bot user instead would put a login-capable row in `users` -
+ * with a NOT NULL password_hash, so it would have to be an unusable one.
+ */
+export async function insertSystemMessage(
+  session: QueryClient,
+  input: { groupId: string; body: string; meta: Record<string, unknown> },
+): Promise<MessageDto> {
+  const allocated = await session.query<Row>('SELECT alloc_group_seq($1) AS seq', [input.groupId]);
+  const seq = allocated.rows[0]?.seq;
+  if (seq === undefined || seq === null) throw new Error('SEQ_ALLOC_FAILED');
+
+  const inserted = await session.query<Row>(
+    `INSERT INTO messages (group_id, seq, sender_id, client_msg_id, kind, body, meta)
+     VALUES ($1, $2, NULL, NULL, 'system', $3, $4::jsonb)
+     RETURNING ${messageColumns('messages')}`,
+    [input.groupId, seq, input.body, JSON.stringify(input.meta)],
+  );
+  const row = inserted.rows[0];
+  if (!row) throw new Error('MESSAGE_INSERT_FAILED');
+  await writeOutboxUpsert(session, row, 'send');
+  return messageFromRow(row);
+}
+
+/**
+ * Rewrite a message in place. This is what aggregation looks like on the wire:
+ * one line in the ops group whose count grows, rather than a new line per hit.
+ *
+ * `reason: 'edit'` is what makes the rewrite reach offline clients too - the
+ * outbox row is the same mechanism a user edit rides on, and spec 4.3.4 requires
+ * the event to carry the full DTO so a receiver can decide by updatedAt.
+ */
+export async function rewriteMessageBody(
+  session: QueryClient,
+  input: { messageId: string; body: string; meta: Record<string, unknown> },
+): Promise<MessageDto | null> {
+  const updated = await session.query<Row>(
+    `UPDATE messages
+        SET body = $2, meta = $3::jsonb, edited_at = now()
+      WHERE id = $1
+      RETURNING ${messageColumns('messages')}`,
+    [input.messageId, input.body, JSON.stringify(input.meta)],
+  );
+  const row = updated.rows[0];
+  if (!row) return null;
+  await writeOutboxUpsert(session, row, 'edit');
+  return messageFromRow(row);
+}
 
 function text(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);

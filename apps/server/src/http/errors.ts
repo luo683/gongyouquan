@@ -34,6 +34,13 @@ const STATUS_BY_CODE: Record<string, number> = {
   DELETE_WINDOW_EXPIRED: 409,
   GROUP_ARCHIVED: 409,
   RATE_LIMITED: 429,
+  // 401, not 403: the caller is not a known principal lacking a permission, they
+  // proved nothing. Without this line the code falls through to 500, which reads
+  // as "the endpoint is broken" to whoever is staring at a failing curl.
+  HOOK_SIGNATURE_INVALID: 401,
+  // 503, and it is worth the extra line: an operator who sees 500 assumes the code
+  // is broken, while 503 plus details.reason says "set SYSTEM_GROUP_ID".
+  OPS_GROUP_NOT_CONFIGURED: 503,
 };
 
 export function statusForErrorCode(code: string): number {

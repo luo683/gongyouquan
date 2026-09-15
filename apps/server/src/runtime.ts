@@ -19,6 +19,7 @@ import { errorEnvelope, HttpError } from './http/errors.js';
 import { registerGroupRoutes } from './groups/routes.js';
 import { registerMessageRoutes } from './messages/routes.js';
 import { registerMemberRoutes } from './groups/member-routes.js';
+import { registerHookRoutes, type HookRouteDeps } from './ops/hooks-routes.js';
 import type { MembersService } from './groups/members-service.js';
 import type { MessageBus } from './messages/bus.js';
 import type { GroupsService } from './groups/service.js';
@@ -41,6 +42,11 @@ export type RuntimeOptions = {
   /** Member management and invite codes; every rule traces to spec 3.4. */
   members?: MembersService;
   sync?: SyncService;
+  /**
+   * `/hooks/*` - the HMAC-signed ops endpoints. Optional for the same reason the
+   * others are: the socket tests stand up no database and hold no alert secret.
+   */
+  hooks?: HookRouteDeps;
   /** Where committed writes go; attached to the rooms below. */
   bus?: MessageBus;
   /** Shared by routes and services; absent only in tests that pin no policy. */
@@ -59,9 +65,10 @@ export type RuntimeOptions = {
    */
   getGroupMemberIds?: (groupIds: string[]) => Promise<string[]>;
   /**
-   * Spec 4.6's leak probe. The ops module that should receive this does not
-   * exist yet (see decisions/0007 section four), so the default is a log line -
-   * which is honest about there being nowhere better for it to go.
+   * Spec 4.6's leak probe. main.ts routes this into the ops alert service, so the
+   * drift lands in #运维告警; the default below stays a log line for runtimes that
+   * wire no ops module (the socket tests), which is still honest about where the
+   * event has nowhere else to go.
    */
   onPresenceDrift?: (drift: { tracked: number; engine: number }) => void;
   /** 30 seconds per spec 4.6; overridable so a test does not have to wait. */
@@ -137,6 +144,7 @@ export async function buildApp(options: RuntimeOptions): Promise<Runtime> {
   if (options.messages) await registerMessageRoutes(app, options.messages, createAuthenticator(options.jwtSecret));
   if (options.sync) await registerSyncRoutes(app, options.sync, createAuthenticator(options.jwtSecret));
   if (options.members) await registerMemberRoutes(app, options.members, createAuthenticator(options.jwtSecret));
+  if (options.hooks) await registerHookRoutes(app, options.hooks);
 
   const presence: Presence = createPresence();
 

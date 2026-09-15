@@ -23,6 +23,10 @@ const COPY: Record<ErrorCode, string> = {
   DELETE_WINDOW_EXPIRED: '超过 2 分钟不能撤回了',
   GROUP_ARCHIVED: '这个群已经归档，只能看不能改',
   RATE_LIMITED: '操作太快了，稍等一下再试',
+  // 以下两条只出自 /hooks/*（运维侧的签名接口），浏览器目前不会调到。仍然给文案，
+  // 因为这张表是**穷尽**的：漏一条就等于承认会有码走上面那个「出了点问题」的兜底。
+  HOOK_SIGNATURE_INVALID: '这个请求的签名没通过校验，是运维接口的问题，不是你的操作问题',
+  OPS_GROUP_NOT_CONFIGURED: '服务端还没有运维告警群，这件事没能记下来',
 };
 
 export function copyFor(code: string, details?: unknown): string {
