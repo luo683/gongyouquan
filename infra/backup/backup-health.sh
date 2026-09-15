@@ -31,10 +31,17 @@ AGE=$(( $(date +%s) - $(stat -c%Y "$MARKER") ))
 # 而一个总是红的灯没有人读。让它可见，不让它失败。
 OFFSITE=$(sed -n 's/.*"offsite": *"\([^"]*\)".*/\1/p' "$MARKER" 2>/dev/null || true)
 [ -n "$OFFSITE" ] || OFFSITE='?'
+# 恢复时要用的就是这个 id。放进健康输出，是为了不必为了「最新那份是哪个快照」
+# 再去 cat 一次标记文件。
+SNAP=$(sed -n 's/.*"restic_snapshot": *"\([^"]*\)".*/\1/p' "$MARKER" 2>/dev/null || true)
 
 if [ "$AGE" -gt "$MAX_AGE" ]; then
   printf '上次备份已是 %s 小时前，超过 %s 小时（异地=%s）\n' "$((AGE / 3600))" "$((MAX_AGE / 3600))" "$OFFSITE"
   exit 1
 fi
 
-printf 'ok：上次备份 %s 小时前，异地=%s\n' "$((AGE / 3600))" "$OFFSITE"
+if [ -n "$SNAP" ]; then
+  printf 'ok：上次备份 %s 小时前，异地=%s 快照=%s\n' "$((AGE / 3600))" "$OFFSITE" "$SNAP"
+else
+  printf 'ok：上次备份 %s 小时前，异地=%s\n' "$((AGE / 3600))" "$OFFSITE"
+fi

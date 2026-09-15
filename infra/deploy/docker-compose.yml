@@ -148,8 +148,12 @@ services:
       # `RESTIC_REPOSITORY: ${RESTIC_REPOSITORY}` 没有默认值——照 8.1 硬实现，
       # 一台还没配对象存储的机器会拿到一个反复重启、红得和「备份真坏了」一样的
       # 容器。ALLOW_LOCAL_ONLY 因此是**手册里没有的变量**，把硬规则换成显式例外。
-      # 配上 restic 仓库之后请把 `:-1` 这个默认删掉：它每多留一天，8.1 就一天没有生效。
       # 全文见 docs/decisions/0013 第三节。
+      #
+      # 「配上 restic 仓库就删掉 `:-1`」这句还**没有到兑现的时候**：restic 分支
+      # 这一轮真的跑通了，但仓库在 /backups 同一个卷上，机器没了它也没了，不满足
+      # 8.1。要删这一行，需要的是指向对象存储或另一台机器的 RESTIC_REPOSITORY。
+      # 见 docs/decisions/0014 第七节。
       RESTIC_REPOSITORY: '${RESTIC_REPOSITORY:-}'
       RESTIC_PASSWORD: '${RESTIC_PASSWORD:-}'
       ALLOW_LOCAL_ONLY: '${ALLOW_LOCAL_ONLY:-1}'
@@ -199,8 +203,9 @@ services:
       interval: 10m
       timeout: 10s
       retries: 3
-      # The first backup runs at container start, so an absent marker during
-      # this window is expected rather than a failure.
+      # backup-loop.sh 只在 `last_success.json` 缺失或超过 26 小时的情况下，于启动时
+      # 补跑一次，所以装机第一天不会有标记文件——那段时间的红是预期而不是故障。
+      # 实测：把标记文件移走后重启容器，首次备份在启动后约 1 分钟内写出，5m 够用。
       start_period: 5m
 
 volumes:
