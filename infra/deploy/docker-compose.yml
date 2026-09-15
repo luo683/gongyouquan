@@ -136,12 +136,26 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      # 排序，不是闸门：`service_started` 只保证 API 容器先起来，备份**照旧**可以在
+      # server 挂着的时候跑（那时候的失败发不出去，但副本必须继续做）。之所以要有
+      # 这一行：backup-loop.sh 会在容器启动的一分钟内补跑/首跑一次，而 `up -d` 的
+      # 默认顺序里 backup 可能排在 server 还在启动的时候——第一次失败正好落在一个
+      # 还没监听 3000 端口的地址上，那条失败就永远没人知道。
+      server:
+        condition: service_started
     environment:
       # The service name, and the same three names the db was created with.
       PG_HOST: 'db'
       POSTGRES_USER: '${POSTGRES_USER}'
       POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
       POSTGRES_DB: '${POSTGRES_DB}'
+      # 手册 8.2 第 4 步：备份失败要说话。同一个密钥签两边，所以这里的值是转发
+      # 而不是第二把钥匙；server 侧已经是 `:?`，整个文件解析时就会卡住，不必再写
+      # 一遍提示语（与上面 POSTGRES_USER 那三行同理）。
+      # 空密钥时 notify-alert.sh 打一行「跳过」退 0——通知缺失不该成为第二次失败。
+      ALERT_HMAC_SECRET: '${ALERT_HMAC_SECRET}'
+      # 容器之间用网络名，不是 localhost:8080（那是 web 对宿主发布的那个口）。
+      ALERT_URL: 'http://server:3000/api/v1/hooks/alert'
       BACKUP_DIR: '/backups'
       UPLOADS_DIR: '/data/uploads'
       # 手册 4.3：`.env` 要 age 加密后随备份一起带走。这个 compose 文件所在的

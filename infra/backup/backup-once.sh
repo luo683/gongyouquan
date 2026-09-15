@@ -22,16 +22,30 @@ AGE_RECIPIENT_FILE="${AGE_RECIPIENT_FILE:-/etc/age/recipient.pub}"
 LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-3}"
 
 # 失败时通知（走同一个告警入口）。|| true 是因为通知本身失败不该掩盖原始错误。
-if [ -x /usr/local/bin/notify-alert.sh ]; then
-  trap '/usr/local/bin/notify-alert.sh backup critical "备份失败" "$TS" || true' ERR
-fi
+#
+# 报告的是「停在哪一步」而不是 $BASH_COMMAND：后者是**展开后**的命令行，而这个脚本
+# `export PGPASSWORD=...`，把一条会失败的赋值或回显发出去就等于把数据库口令贴进
+# 一个 HTTP 请求体。步骤名是人写的，因此也是安全的。
+STEP='启动'
+notify_failure() {
+  # 缺脚本 / 缺签名密钥时 notify-alert.sh 自己会打一行「跳过」再退 0，所以这里
+  # 不需要再判断一遍；`|| true` 兜住的是它**发不出去**的那条路。
+  [ -x /usr/local/bin/notify-alert.sh ] || return 0
+  /usr/local/bin/notify-alert.sh backup critical "备份失败" "$TS" "$*" backup-failed || true
+}
+# 两条路都要走，因为它们的覆盖面不重叠：
+#   - ERR trap 接住的是没被 `|| die` 挡住的失败（pg_dump、restic、age…）；
+#   - die() 自己调用，因为 `exit` 不触发 ERR trap，而 `[ -f x ] || die` 这种
+#     `||` 列表里 trap 也不触发。少了这一半，说得最清楚的那些失败反而是沉默的。
+trap 'notify_failure "停在「$STEP」（第 $LINENO 行）"' ERR
 
 log() { printf '[%s] %s\n' "$(date -Iseconds)" "$*" >&2; }
-die() { log "FATAL: $*"; exit 1; }
+die() { log "FATAL: $*"; notify_failure "停在「$STEP」：$*"; exit 1; }
 
 mkdir -p "$DIR"
 
 # ── 1. 数据库。nice 让出 CPU：备份是「可以慢慢做」的活（手册 2.4）。──
+STEP='第 1 步 pg_dump'
 : "${PG_HOST:?PG_HOST 未设置}"
 : "${POSTGRES_USER:?POSTGRES_USER 未设置}"
 : "${POSTGRES_DB:?POSTGRES_DB 未设置}"
@@ -49,6 +63,7 @@ log "pg_dumpall --globals-only -> $GLOBALS"
 pg_dumpall -h "$PG_HOST" -U "$POSTGRES_USER" --globals-only | gzip > "$GLOBALS"
 
 # ── 2. ★ 校验：备份必须能列出目录才算成功（只生成文件不算）──
+STEP='第 2 步 校验 dump'
 log "校验 dump 可读性"
 pg_restore --list "$DUMP" > /dev/null || die "dump 校验失败：$DUMP 不可读，视为备份失败"
 TOC_ENTRIES=$(pg_restore --list "$DUMP" | grep -c '^[0-9]' || true)
@@ -56,6 +71,7 @@ TOC_ENTRIES=$(pg_restore --list "$DUMP" | grep -c '^[0-9]' || true)
 
 # ── 3. 秘密（加密后一起走）。理由见手册 4.3：没有 RESTIC_PASSWORD 就无法解密
 #       任何异地备份，所以「加密备份密钥而不备份密钥本身」等于备份了一堆随机数据。──
+STEP='第 3 步 age 加密 .env'
 ENV_BACKUP=""
 if [ -f "$ENV_FILE" ]; then
   if [ -f "$AGE_RECIPIENT_FILE" ] && command -v age >/dev/null 2>&1; then
@@ -72,6 +88,7 @@ else
 fi
 
 # ── 4. 上传异地 ──
+STEP='第 4 步 restic 上传'
 OFFSITE="skipped"
 RESTIC_SNAP=""
 RESTIC_TIME=""
@@ -141,6 +158,7 @@ else
 fi
 
 # ── 5. 成功标志。巡检项 20 读这个文件的 mtime，项 21 读它指向的 dump。──
+STEP='第 5 步 写成功标志'
 cat > "$DIR/last_success.json" <<EOF
 {
   "ts": "$(date -Iseconds)",
@@ -158,6 +176,7 @@ EOF
 log "写入 $DIR/last_success.json"
 
 # ── 6. 清理本地暂存（异地已有副本；本地只留 3 天）──
+STEP='第 6 步 清理本地暂存'
 find "$DIR" -name 'db_*.dump'       -mtime +"$LOCAL_RETENTION_DAYS" -delete
 find "$DIR" -name 'globals_*.sql.gz' -mtime +"$LOCAL_RETENTION_DAYS" -delete
 find "$DIR" -name 'env-backup.age'   -mtime +"$LOCAL_RETENTION_DAYS" -delete

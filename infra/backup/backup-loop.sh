@@ -35,9 +35,10 @@ cat "$CRONTAB" >&2
 # 选项（它是 `restic version` 子命令），统一拼法会让这一行日志变成
 # `restic: unknown flag: --version`——而这份日志正是「工具链到底在不在」的证据，
 # 它不该长得像装坏了。
-for TOOL in pg_dump pg_restore restic age; do
+for TOOL in pg_dump pg_restore restic age openssl; do
   case "$TOOL" in
     restic) VERSION_CMD='restic version' ;;
+    openssl) VERSION_CMD='openssl version' ;;
     *)      VERSION_CMD="$TOOL --version" ;;
   esac
   if command -v "$TOOL" > /dev/null 2>&1; then
@@ -45,10 +46,16 @@ for TOOL in pg_dump pg_restore restic age; do
   else
     # restic 与 age 缺失只在未配置异地时才是致命的，backup-once.sh 会自己判断，
     # 所以这里只警告；pg_dump 缺失则直接失败，因为没有它这个容器毫无意义。
+    # openssl 同「只警告」那一档，但它值得单独说一句：缺了它备份照做，**失败却没人
+    # 知道**——notify-alert.sh 签不出名，只能打一行跳过。这是唯一一个缺失后果是
+    # 「沉默」而不是「少一份副本」的包。
     case "$TOOL" in
       pg_dump | pg_restore)
         echo "[backup-loop] FATAL: 缺少 $TOOL" >&2
         exit 1
+        ;;
+      openssl)
+        echo "[backup-loop] 警告: 缺少 openssl —— 备份会做，但失败发不出告警" >&2
         ;;
       *) echo "[backup-loop] 警告: 缺少 $TOOL（未配置异地备份时可接受）" >&2 ;;
     esac
