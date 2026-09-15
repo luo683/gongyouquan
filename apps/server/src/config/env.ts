@@ -1,5 +1,19 @@
 import { z } from 'zod';
 
+/**
+ * A variable that is present but blank is unset.
+ *
+ * Compose has no way to express "pass this through only if it has a value":
+ * `SYSTEM_GROUP_ID: '${SYSTEM_GROUP_ID:-}'` puts an empty string into the
+ * container, and `z.string().min(1).optional()` rejects that - so the whole API
+ * would refuse to start over the one variable that only /hooks/alert reads. The
+ * safe direction is the one that matches what the operator meant.
+ */
+const blankToUndefined = z.preprocess(
+  (value) => (value === '' ? undefined : value),
+  z.string().min(1).optional(),
+);
+
 const rawEnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
@@ -10,9 +24,9 @@ const rawEnvSchema = z.object({
   MEILI_URL: z.string().url(),
   MEILI_MASTER_KEY: z.string().min(1),
   ALERT_HMAC_SECRET: z.string().min(1),
-  SYSTEM_GROUP_ID: z.string().min(1).optional(),
-  OPS_APPROVER_GROUP_ID: z.string().min(1).optional(),
-  CONTRACT_VERSION: z.string().min(1).optional(),
+  SYSTEM_GROUP_ID: blankToUndefined,
+  OPS_APPROVER_GROUP_ID: blankToUndefined,
+  CONTRACT_VERSION: blankToUndefined,
   /**
    * Optional. Loopback always reads /internal/metrics; this is what any other
    * caller must present. It exists for the case where the port gets published by
@@ -20,7 +34,7 @@ const rawEnvSchema = z.object({
    * reconnaissance material rather than a secret in itself, but there is no reason
    * to hand it out.
    */
-  INTERNAL_METRICS_TOKEN: z.string().min(1).optional(),
+  INTERNAL_METRICS_TOKEN: blankToUndefined,
   LOG_LEVEL: z.string().min(1).default('info'),
 });
 

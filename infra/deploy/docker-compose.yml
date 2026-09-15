@@ -85,6 +85,14 @@ services:
       # replace.
       MEILI_MASTER_KEY: '${MEILI_MASTER_KEY:?MEILI_MASTER_KEY 未设置（见 infra/deploy/.env.example）}'
       ALERT_HMAC_SECRET: '${ALERT_HMAC_SECRET:?ALERT_HMAC_SECRET 未设置（见 infra/deploy/.env.example）}'
+      # Which group /hooks/alert posts into, including this process's own
+      # presence-drift line. Deliberately `${:-}` rather than `:?`: a blank one
+      # leaves the endpoint answering 503 OPS_GROUP_NOT_CONFIGURED (reason
+      # `env-unset`), which is the right size of problem for a group that only the
+      # alert path reads - it must not hold the login path hostage. env.ts reads an
+      # empty string as unset for exactly this reason.
+      # cli/create-admin.ts creates #运维告警 and prints the id to put here.
+      SYSTEM_GROUP_ID: '${SYSTEM_GROUP_ID:-}'
       LOG_LEVEL: 'info'
       # Injected rather than computed at build time; sync:hello carries it so an
       # old client can warn instead of drifting silently.
