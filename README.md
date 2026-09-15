@@ -22,12 +22,12 @@
   `docker compose -f infra/deploy/docker-compose.yml up -d --build`，再
   `docker compose -f infra/deploy/docker-compose.yml run --rm --workdir /app/apps/server server node --import tsx src/cli/create-admin.ts` 建首个账号
   （缺密钥时 `docker compose config` 直接拒绝解析，取舍见 `docs/decisions/0012`）
-- 尚未接入：tasks/files/search/ops、Electron。**备份已经不是一个脚本而是一个容器**：`infra/backup/Dockerfile` + compose 里的 `backup` 服务，由 supercronic 按 `BACKUP_HOUR`/`BACKUP_MINUTE` 调度，`backup-health.sh` 做「多久没有成功备份」的探活；恢复演练真跑过一次并通过，用的就是这个容器自己 dump 出来的那份（数字见 `docs/HANDOVER.md` §4）
+- 尚未接入：tasks/files/search/ops、Electron。**备份已经不是一个脚本而是一个容器**：`infra/backup/Dockerfile` + compose 里的 `backup` 服务，由 supercronic 按 `BACKUP_HOUR`/`BACKUP_MINUTE` 调度，`backup-health.sh` 做「多久没有成功备份」的探活；恢复演练真跑过并通过，而且**用的不是本地那一份 dump，是从 restic 仓库里 `restore` 出来的那一份**——`pg_dump → restic → restic restore → pg_restore → 七道验收`整条链一次跑绿（数字见 `docs/HANDOVER.md` §4）
 - 真实 PostgreSQL 验证**已完成**（PG 17.11）：建库、迁移连跑两次为 no-op、checksum 防篡改、auth/groups 的 SQL 真跑，
   固化为 `apps/server/tests/integration/` 与 `tests/e2e/`（47 个用例，分布在 3 个文件；由 `INTEGRATION_DATABASE_URL` 开关，不设则整体 skip）
 - 本地起库：`docker compose -f infra/db/docker-compose.yml up -d`（宿主端口 55432；镜像走 daocloud 源，Docker Hub 在本机不可达）
 - 真库首跑暴露的 6 条矛盾与缺口登记在 `docs/decisions/0005`，其中一条推翻说明书 4.2 关于 seq 空洞的论断
-- **不能直接对外上线**：还缺 `ops` 模块（`/hooks/*`、告警落点、巡检——`backup-once.sh` 失败时该说话的 `notify-alert.sh` 也在那里）、systemd 单元与 `opsctl`；以及这台机器给不了的两样凭据：一把**私钥放在机器外**的 age 密钥，和一个**真的 restic 仓库**（现在栈是靠 `ALLOW_LOCAL_ONLY=1` 这个显式例外声明起起来的，那不是备份策略）。Caddy 在这个栈里是 `auto_https off` 的明文 :8080
+- **不能直接对外上线**：还缺 `ops` 模块（`/hooks/*`、告警落点、巡检——`backup-once.sh` 失败时该说话的 `notify-alert.sh` 也在那里）、systemd 单元与 `opsctl`；以及这台机器给不了的两样凭据：一把**私钥放在机器外**的 age 密钥，和一个**不在同一台机器上的 restic 仓库**（restic 这一段代码已经真跑通，但验证用的仓库落在 `/backups` 同一个卷上，机器没了它也没了——所以栈里那个 `ALLOW_LOCAL_ONLY=1` 的显式例外**还没到能删的时候**，见 `docs/decisions/0014` 第七节）。Caddy 在这个栈里是 `auto_https off` 的明文 :8080
 
 ## 目录约定
 
