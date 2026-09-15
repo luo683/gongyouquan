@@ -30,9 +30,12 @@ function isModerator(role: GroupRole): boolean {
  * There is no outbox dispatcher in this build, so a crash between COMMIT and
  * publish can drop a live event. That is accepted here rather than papered over
  * because the recovery path for a missed event already exists and is what sync:pull
- * is for: a client that never got message:new still converges on reconnect.
- * Registering the delivery in 6.9's outbox worker is the follow-up that removes the
- * window entirely.
+ * is for: a client that never got message:new still converges on reconnect,
+ * because the row it pulls is already committed.
+ *
+ * Do not read 6.9's outbox as the fix for this window — that outbox's consumer is
+ * the search index, not client delivery, so draining it would not resend a socket
+ * event to anyone.
  */
 export type MessagePublisher = (event: MessageEvent, message: MessageDto) => void | Promise<void>;
 

@@ -246,6 +246,69 @@ describe.runIf(url !== '')('messages write path (real PostgreSQL)', () => {
     expect(await countOf()).toBe(3);
   });
 
+  /**
+   * Spec 6.9 says the payload must be **self-contained** and that the worker must
+   * not re-query `messages`. That is not a performance note: re-querying means an
+   * edit landing between the write and the consumption gets indexed under the
+   * older row's version, and "改了又改" leaves a middle state in the index forever.
+   * So the body has to be in the row, and these tests are what make a future
+   * slimming of the payload — or a revoke riding an `upsert` — a failing change
+   * rather than a silent one.
+   */
+  it('carries the body and kind in the payload so the index worker never reads back', async () => {
+    const { message } = await send(owner, '塔吊十点了进场');
+    const event = row0(
+      (
+        await harness.db.query<Row>(
+          `SELECT payload FROM outbox WHERE aggregate_id = $1 AND event_type = 'upsert'`,
+          [message.id],
+        )
+      ).rows,
+    );
+    const payload = event.payload as Record<string, unknown>;
+
+    expect(payload.body).toBe('塔吊十点了进场');
+    expect(payload.kind).toBe('text');
+    expect(payload.senderId).toBe(owner);
+    expect(payload.groupId).toBe(groupId);
+    expect(payload.messageId).toBe(message.id);
+  });
+
+  it('indexes the body as of each write, not the body as of the read', async () => {
+    const { message } = await send(owner, '第一版');
+    await messages.edit(owner, message.id, '第二版');
+
+    const bodies = (
+      await harness.db.query<Row>(
+        `SELECT payload->>'body' AS body FROM outbox
+          WHERE aggregate_id = $1 ORDER BY id`,
+        [message.id],
+      )
+    ).rows.map((r) => str(r.body));
+
+    // Both versions are in the log, in order. The worker replays them sorted by
+    // `id` and the last write wins in the index — which is only correct because
+    // each row carries its own copy of the text.
+    expect(bodies).toEqual(['第一版', '第二版']);
+  });
+
+  it('revokes with a delete event, because an upsert would leave the text indexed', async () => {
+    const { message } = await send(owner, '撤回我');
+    await messages.revoke(owner, message.id);
+
+    const events = (
+      await harness.db.query<Row>(
+        `SELECT event_type FROM outbox WHERE aggregate_id = $1 ORDER BY id`,
+        [message.id],
+      )
+    ).rows.map((r) => str(r.event_type));
+
+    // 6.9's index scope is `deleted_at IS NULL`, and it says plainly: 撤回时向 outbox
+    // 写一条 event_type='delete'. A third 'upsert' would tell the worker to keep the
+    // document, so the revoked text would stay searchable by body.
+    expect(events).toEqual(['upsert', 'delete']);
+  });
+
   it('rejects kinds this round cannot persist', async () => {
     await expectCode('INVALID_ARGUMENT', () =>
       messages.send(owner, { groupId, clientMsgId: randomUUID(), kind: 'image', body: '图' }),

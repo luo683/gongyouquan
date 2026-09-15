@@ -81,8 +81,10 @@ gated('/hooks/alert against a real database', () => {
     // jsonb comes back already parsed; String()ing it would give "[object Object]".
     expect((row.meta as { alert: { hitCount: number } }).alert.hitCount).toBe(1);
 
-    // Without this row an ops client that was offline during the alert never sees
-    // it: the socket emit is live-only, the outbox is the durable half.
+    // Not a delivery mechanism: an offline client is caught up by `sync:pull`.
+    // This row exists because the alert line is written through the same path as
+    // any other message, and 6.9 attaches an event to every one. Whether a
+    // `kind='system'` row belongs in the search index is still open.
     const outbox = await h.db.query<Row>(
       `SELECT event_type, processed_at FROM outbox WHERE aggregate_type = 'message' AND aggregate_id = $1`,
       [result.messageId],

@@ -51,21 +51,46 @@ export function withSession<T>(database: QueryClient, fn: (session: QueryClient)
 /**
  * Every message state change writes its outbox row inside the same transaction
  * (spec 6.9): a committed message always has an event, a rolled-back one has
- * neither. `processed_at` stays NULL until the broadcaster claims it.
+ * neither. Nothing consumes these rows yet — `processed_at` stays NULL, which is
+ * what `/readyz`'s lag and inspection item 18 are measuring.
+ *
+ * Two rules from 6.9 are load-bearing for whoever writes the worker, so they are
+ * enforced here where they can be tested:
+ *
+ * 1. **The payload is self-contained.** The worker must not read back into
+ *    `messages`, because a read at consumption time answers "what is it now", not
+ *    "what did this event say" — an edit landing in between gets indexed under the
+ *    older row's version, and a message edited twice leaves an intermediate state
+ *    in the index that nothing later corrects. So the body travels in the row.
+ * 2. **A revoke is a `delete`, not an upsert.** 6.9's index scope is
+ *    `deleted_at IS NULL`; a third upsert would tell the worker to keep a document
+ *    whose text was withdrawn, i.e. revoked content stays searchable by body.
+ *    The delete row therefore carries only the document key — the withdrawn text
+ *    is not copied into a second table that has no retention rule of its own.
  */
-async function writeOutboxUpsert(session: QueryClient, row: Row, reason: 'send' | 'edit' | 'revoke'): Promise<void> {
-  await session.query(
-    `INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload)
-     VALUES ('message', $1, 'upsert', $2::jsonb)`,
-    [
-      row.id,
-      JSON.stringify({
+async function writeOutboxEvent(
+  session: QueryClient,
+  row: Row,
+  reason: 'send' | 'edit' | 'revoke',
+): Promise<void> {
+  const deleting = reason === 'revoke';
+  const payload = deleting
+    ? { messageId: String(row.id), groupId: String(row.group_id), seq: Number(row.seq), reason }
+    : {
         messageId: String(row.id),
         groupId: String(row.group_id),
         seq: Number(row.seq),
+        senderId: row.sender_id === null ? null : String(row.sender_id),
+        kind: String(row.kind),
+        body: row.body === null ? null : String(row.body),
+        createdAt: (row.created_at as Date).toISOString(),
         reason,
-      }),
-    ],
+      };
+
+  await session.query(
+    `INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload)
+     VALUES ('message', $1, $2, $3::jsonb)`,
+    [row.id, deleting ? 'delete' : 'upsert', JSON.stringify(payload)],
   );
 }
 
@@ -105,7 +130,7 @@ export async function insertSystemMessage(
   );
   const row = inserted.rows[0];
   if (!row) throw new Error('MESSAGE_INSERT_FAILED');
-  await writeOutboxUpsert(session, row, 'send');
+  await writeOutboxEvent(session, row, 'send');
   return messageFromRow(row);
 }
 
@@ -113,9 +138,11 @@ export async function insertSystemMessage(
  * Rewrite a message in place. This is what aggregation looks like on the wire:
  * one line in the ops group whose count grows, rather than a new line per hit.
  *
- * `reason: 'edit'` is what makes the rewrite reach offline clients too - the
- * outbox row is the same mechanism a user edit rides on, and spec 4.3.4 requires
- * the event to carry the full DTO so a receiver can decide by updatedAt.
+ * Delivery is the bus event (`message:updated`, full DTO so a receiver can decide
+ * by `updatedAt`) for live clients, and `sync:pull` for anyone who was away — that
+ * path reads the current `messages` row, which is already the rewritten text. The
+ * outbox row written here is **not** part of either: it exists for the search
+ * index, which has no worker yet.
  */
 export async function rewriteMessageBody(
   session: QueryClient,
@@ -130,7 +157,7 @@ export async function rewriteMessageBody(
   );
   const row = updated.rows[0];
   if (!row) return null;
-  await writeOutboxUpsert(session, row, 'edit');
+  await writeOutboxEvent(session, row, 'edit');
   return messageFromRow(row);
 }
 
@@ -277,7 +304,7 @@ export function createMessagesRepository(database: QueryClient): MessageReposito
 
             // Same transaction as the message: a committed message always has its
             // outbox event; a rolled-back one leaves neither behind (spec 6.9).
-            await writeOutboxUpsert(session, row, 'send');
+            await writeOutboxEvent(session, row, 'send');
 
             /**
              * INSERT ... RETURNING cannot carry the aggregates, and the row above
@@ -350,7 +377,7 @@ export function createMessagesRepository(database: QueryClient): MessageReposito
             return { kind: 'windowExpired' } as EditOutcome;
           }
 
-          await writeOutboxUpsert(session, row, 'edit');
+          await writeOutboxEvent(session, row, 'edit');
           await session.query('COMMIT');
           return { kind: 'edited', message: messageFromRow(row) } satisfies EditOutcome;
         } catch (error) {
@@ -398,7 +425,7 @@ export function createMessagesRepository(database: QueryClient): MessageReposito
             return { kind: 'windowExpired' } as RevokeOutcome;
           }
 
-          await writeOutboxUpsert(session, row, 'revoke');
+          await writeOutboxEvent(session, row, 'revoke');
           await session.query('COMMIT');
           return { kind: 'revoked', message: messageFromRow(row) } satisfies RevokeOutcome;
         } catch (error) {
